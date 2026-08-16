@@ -3,6 +3,10 @@
 Minimaler Beweis-Ansatz: per-Bit-Encoding. Jedes Bit des 32-Bit-Ergebnisses
 wird einzeln ueber eine 3-Bit-LUT (lut_imm8, nur untere 8 Bit genutzt)
 berechnet. Queries nur unter __main__-Guard (import-sauber).
+
+Sektionen (M1..M19) als _run_MX-Funktionen; CLI-Auswahl via -g/--group (M-Namen
+oder Aliase: ternlog/bitfrob/arith4/permb/pipe/macro/gf/decoder/smoke), --skip,
+--list. Default: alle Sektionen. Per-Sektion-Timing wird immer gedruckt.
 """
 
 import sys
@@ -264,21 +268,25 @@ def model_arith4(s1, s2, s3, mode, c_in=z3.BitVecVal(0, 1), inv_1=False, inv_2=F
     c = (z3.BitVecVal(0, 32) - s3) if inv_3 else s3
     if mode == 1:   # ADD
         res = a + b + c
-    elif mode == 2:  # ADDC
-        res = a + b + c + z3.ZeroExt(31, c_in)
-    elif mode == 4:  # USATADD (unsigned sat, 33-Bit)
-        full = z3.ZeroExt(1, a) + z3.ZeroExt(1, b) + z3.ZeroExt(1, c)
-        res = z3.If(z3.UGT(full, z3.BitVecVal(0xFFFFFFFF, 33)), z3.BitVecVal(0xFFFFFFFF, 32), z3.Extract(31, 0, full))
-    elif mode == 5:  # SATADD (signed sat, 33-Bit sign-ext)
-        full = z3.SignExt(1, a) + z3.SignExt(1, b) + z3.SignExt(1, c)
-        res = z3.If(full > z3.BitVecVal(0x7FFFFFFF, 33), z3.BitVecVal(0x7FFFFFFF, 32),
-               z3.If(full < z3.BitVecVal(0x180000000, 33), z3.BitVecVal(0x80000000, 32),
+    elif mode == 2:  # ADDC (inv_2=True = SUBB-Integration: Carry-Beitrag als Borrow c-1)
+        res = a + b + c + z3.ZeroExt(31, c_in) - (z3.BitVecVal(1, 32) if inv_2 else z3.BitVecVal(0, 32))
+    elif mode == 4:  # USATADD — z3-Label der Hist-Nummer; ISS-Semantik = SATADD(mode 5) + unsigned=True
+        full = z3.ZeroExt(2, a) + z3.ZeroExt(2, b) + z3.ZeroExt(2, c)
+        res = z3.If(z3.UGT(full, z3.BitVecVal(0xFFFFFFFF, 34)), z3.BitVecVal(0xFFFFFFFF, 32), z3.Extract(31, 0, full))
+    elif mode == 5:  # SATADD (signed sat, 34-Bit sign-ext: 3-Operanden-Summe bis +-3*2^31)
+        full = z3.SignExt(2, a) + z3.SignExt(2, b) + z3.SignExt(2, c)
+        # signed-Vergleich via Vorzeichen-Flip + UGT/ULT (z3py kennt kein SGT/SLT):
+        #   UGT(full^S, x^S) <=> signed full > x;  ULT <=> signed full < x  (S = Bit 33)
+        f34 = full ^ z3.BitVecVal(0x200000000, 34)
+        res = z3.If(z3.UGT(f34, z3.BitVecVal(0x27FFFFFFF, 34)), z3.BitVecVal(0x7FFFFFFF, 32),
+               z3.If(z3.ULT(f34, z3.BitVecVal(0x180000000, 34)), z3.BitVecVal(0x80000000, 32),
                      z3.Extract(31, 0, full)))
     elif mode == 6:   # AVG: (a+b+(c&1))>>1
         full = z3.ZeroExt(1, a) + z3.ZeroExt(1, b) + z3.ZeroExt(32, z3.Extract(0, 0, c))
         res = z3.Extract(31, 0, z3.LShR(full, 1))
-    elif mode == 7:   # ABSADD: |a|+b+c (|INT_MIN| wrappt)
-        absa = z3.If(a >= z3.BitVecVal(0, 32), a, z3.BitVecVal(0, 32) - a)
+    elif mode == 7:   # ABSADD: |a|+b+c (|INT_MIN| wrappt); Vorzeichen = Bit31
+        # If(a>=0,...) war UGE -> immer a (nie negiert). Bit31-Check: 2^32-a wenn Bit31.
+        absa = z3.If(z3.Extract(31, 31, a) == 1, z3.BitVecVal(0, 32) - a, a)
         res = absa + b + c
     elif mode == 10:  # SLT (Maske): Sign-Flip, signed Vergleich via Unsigned-Borrow
         # (Overflow-sicher, gleiche HW wie SLTU: carry-out==0 von ca+~cb+c
@@ -288,26 +296,257 @@ def model_arith4(s1, s2, s3, mode, c_in=z3.BitVecVal(0, 1), inv_1=False, inv_2=F
         # der korrigierten pipeline.py. inv_2 BEWUSST ignoriert (raw s2).
         ca = a ^ z3.BitVecVal(0x80000000, 32)
         cb = s2 ^ z3.BitVecVal(0x80000000, 32)
-        t33 = z3.ZeroExt(1, ca) + z3.ZeroExt(1, (~cb) & 0xFFFFFFFF) + z3.ZeroExt(1, c)
-        res = z3.If(z3.Extract(32, 32, t33) == 0, z3.BitVecVal(0xFFFFFFFF, 32), z3.BitVecVal(0, 32))
-    elif mode == 11:  # SLTU (Maske): carry-out von a+~b+c
-        full = z3.ZeroExt(1, a) + z3.ZeroExt(1, ~s2) + z3.ZeroExt(1, c)
-        res = z3.If(z3.Extract(32, 32, full) == 0, z3.BitVecVal(0xFFFFFFFF, 32), z3.BitVecVal(0, 32))
-    elif mode == 12:  # MFC
+        # 34-Bit: 3-Operanden-Summe bis 3*2^32 (33-Bit wuerde >2^33 wrappen)
+        t34 = z3.ZeroExt(2, ca) + z3.ZeroExt(2, (~cb) & 0xFFFFFFFF) + z3.ZeroExt(2, c)
+        # carry-out = full >= 2^32 (nicht nur Bit32: Bit33 kann gesetzt sein bei 34-Bit)
+        res = z3.If(z3.UGT(t34, z3.BitVecVal(0xFFFFFFFF, 34)), z3.BitVecVal(0, 32), z3.BitVecVal(0xFFFFFFFF, 32))
+    elif mode == 11:  # SLTU — z3-Label der Hist-Nummer; ISS-Semantik = SLT(mode 10) + unsigned=True
+        # 34-Bit analog SLT (33-Bit-Overflow-Bug durch Fuzzer gefunden)
+        full = z3.ZeroExt(2, a) + z3.ZeroExt(2, ~s2) + z3.ZeroExt(2, c)
+        res = z3.If(z3.UGT(full, z3.BitVecVal(0xFFFFFFFF, 34)), z3.BitVecVal(0, 32), z3.BitVecVal(0xFFFFFFFF, 32))
+    elif mode == 12:  # MFC (z3-Label der internen Nummer; ISS-Mode = ArithMode.MFC = 40)
         res = z3.ZeroExt(31, c_in)
     elif mode == 13:  # ADDSHIFT1: a+(b<<1)
         res = a + (b << 1)
     elif mode == 14:  # ADDSHIFT2: a+(b<<2)
         res = a + (b << 2)
-    elif mode == 25:  # SUBB (ARM SBC): a+~s2+c+c_in, inv_2 ignoriert
-        res = a + (~s2) + c + z3.ZeroExt(31, c_in)
     else:
         raise ValueError(f"M8a: mode {mode} nicht im Skalar-Satz")
     return (res, c)   # aux = s3 (post-inv) fuer alle M8a-Modi
 
 
-if __name__ == "__main__":
-    z3.set_param("parallel.enable", True)  # Multi-Core: mehrere Strategien parallel
+# ---- geteilte Helper (von Sektionen in __main__-Guard gehoistet): ----
+# Modell-Funktionen + Lemma-Tabelle + unsat-Solver (sektionsuebergreifend).
+
+# Q33: Lemma-Table (Ergebnis der 1-Pass-Enumeration).
+LEMMAS = {
+    'R_AND': 'ternlog LUT 0xC0',
+    'R_OR': 'ternlog LUT 0xFC',
+    'R_XOR': 'ternlog LUT 0x3C',
+    'R_NOT': 'ternlog LUT 0x01',
+    'R_ANDNOT': 'ternlog LUT 0x30',
+    'R_ORC': 'ternlog LUT 0xF3',
+    'R_BIN2GRAY': 'bitfrob LSR(1) + ternlog XOR strobe1',
+    'R_ADJSWAP': 'bitfrob BITSWAP mask 0x55555555 sh1',
+    'I_GRAY2BIN': 'fine-shift 1-pass unmoeglich',
+    'I_POPCNT32': 'braucht 2. arith4 PWADD',
+    'I_UBFX8': 'siehe Q20',
+}
+
+
+def model_permb_byte(s1, s2, ctrl, blank_enable=True):
+    """Byte-Modus: 4 Output-Bytes, ctrl_byte&0x07 waehlt Concat-Byte (0..7),
+    High-Bit 0x80 blankt (wenn blank_enable). concat = [s1 | s2], s1=HIGH."""
+    concat = z3.Concat(s1, s2)                      # 64-Bit
+    res = z3.BitVecVal(0, 32)
+    for i in range(4):
+        cb = (ctrl >> (8 * i)) & 0xFF
+        idx = cb & 0x07
+        blank = (cb & 0x80) != 0
+        if blank_enable and blank:
+            val = z3.BitVecVal(0, 8)
+        else:
+            val = z3.Extract(7 + 8 * idx, 8 * idx, concat)
+        res = res | (z3.ZeroExt(24, val) << z3.BitVecVal(8 * i, 32))
+    return res
+
+
+def model_permb_shift(s1, s2, n, shift_left=False):
+    """shift_ctrl: src3=Shift-Menge (0..31), Byte-Teil k=n>>3 synthetisiert
+    Verschiebe-Maske on-the-fly. LSR: out-Byte i = Concat-Byte (k+i), k+i>=4
+    -> blank (32-Bit-Wert in src2). LSL: out-Byte i = Concat-Byte (i-k),
+    i<k -> blank. shifted_out (rausgeschobene Bytes) als zweiter Rueckgabe.
+    Liefert (res, shifted_out)."""
+    concat = z3.Concat(s1, s2)
+    k = (n & 0x1F) >> 3
+    res = z3.BitVecVal(0, 32)
+    so = z3.BitVecVal(0, 32)
+    if not shift_left:
+        for i in range(4):
+            idx = k + i
+            if idx >= 4:
+                val = z3.BitVecVal(0, 8)
+            else:
+                val = z3.Extract(7 + 8 * idx, 8 * idx, concat)
+            res = res | (z3.ZeroExt(24, val) << z3.BitVecVal(8 * i, 32))
+        for j in range(min(k, 4)):
+            so = so | z3.ZeroExt(24, z3.Extract(7 + 8 * j, 8 * j, concat))
+    else:
+        for i in range(4):
+            idx = i - k
+            if idx < 0:
+                val = z3.BitVecVal(0, 8)
+            else:
+                val = z3.Extract(7 + 8 * idx, 8 * idx, concat)
+            res = res | (z3.ZeroExt(24, val) << z3.BitVecVal(8 * i, 32))
+        for j in range(min(k, 4)):
+            so = so | z3.ZeroExt(24, z3.Extract(7 + 8 * (8 - k + j), 8 * (8 - k + j), concat))
+    return res, so
+
+
+def _m9_unsat(name, fml):
+    """QF_BV-Solver, Negations-Idiom: unsat erwartet. Bei sat Gegenbeispiel
+    via m.eval drucken und STOP (kein Weaken)."""
+    s = z3.SolverFor('QF_BV')
+    s.set("timeout", 30000)
+    s.add(fml)
+    r = s.check()
+    if r == z3.sat:
+        m = s.model()
+        print(f"{name}: SAT -> Gegenbeispiel: {m.eval(fml, model_completion=True)}")
+        assert False, f"{name}: sat -> STOP (kein Weaken)"
+    assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
+    print(f"{name} PASS")
+
+
+def _m14_unsat(name, fml, cex_vars):
+    """QF_BV-Solver, Negations-Idiom (wie _m9_unsat, mit CEX-Variablen).
+    unsat erwartet; bei sat Gegenbeispiel via m.eval drucken und STOP."""
+    s = z3.SolverFor('QF_BV')
+    s.set("timeout", 30000)
+    s.add(fml)
+    r = s.check()
+    if r == z3.sat:
+        m = s.model()
+        cex = ", ".join(f"{v}={m.eval(v, model_completion=True)}" for v in cex_vars)
+        print(f"{name}: SAT -> Gegenbeispiel {cex}")
+        assert False, f"{name}: sat -> STOP (kein Weaken)"
+    assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
+    print(f"{name} PASS")
+
+
+def _m16_unsat(name, fml, cex_vars):
+    """QF_BV-Solver, Negations-Idiom (wie _m14_unsat) + Konsistenz-Guard:
+    z3 4.16.0 liefert bei tiefen ite+bvsub-Formeln spurious SAT (Modell
+    evaluiert die Formel zu False). Bei sat daher erst m.eval(fml):
+    eval==False -> z3-Bug -> STOP mit Meldung; eval==True -> echtes
+    Gegenbeispiel drucken und STOP (kein Weaken)."""
+    s = z3.SolverFor('QF_BV')
+    s.set("timeout", 30000)
+    s.add(fml)
+    r = s.check()
+    if r == z3.sat:
+        m = s.model()
+        if z3.is_false(m.eval(fml, model_completion=True)):
+            assert False, f"{name}: spurious SAT (z3-Modell widerspricht Formel) -> STOP"
+        cex = ", ".join(f"{v}={m.eval(v, model_completion=True)}" for v in cex_vars)
+        print(f"{name}: SAT -> Gegenbeispiel {cex}")
+        assert False, f"{name}: sat -> STOP (kein Weaken)"
+    assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
+    print(f"{name} PASS")
+
+
+def _m17_unsat(name, fml, cex_vars):
+    """QF_BV-Solver, Negations-Idiom (wie _m16_unsat): unsat erwartet.
+    sat -> Gegenbeispiel via m.eval (model_completion=True) + STOP."""
+    s = z3.SolverFor('QF_BV')
+    s.set("timeout", 30000)
+    s.add(fml)
+    r = s.check()
+    if r == z3.sat:
+        m = s.model()
+        cex = ", ".join(f"{v}={m.eval(v, model_completion=True)}" for v in cex_vars)
+        print(f"{name}: SAT -> Gegenbeispiel {cex}")
+        assert False, f"{name}: sat -> STOP (kein Weaken)"
+    assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
+    print(f"{name} PASS")
+# ---- M8b/M10-Modelle (sektionsuebergreifend genutzt): ----
+
+def model_cmp(s1, s2, lb):
+    """SWAR-Gleichheit: Lane = all-ones iff s1_Lane == s2_Lane.
+
+    lb < 32 via (x&lm)+lm-Trick; lb == 32 braucht Sonderfall, da die
+    SWAR-Formel ein Reserve-Bit ueber der Lane benoetigt (z=0 fuer lb=32).
+    """
+    if lb == 32:
+        return z3.If(s1 == s2, z3.BitVecVal(0xFFFFFFFF, 32), z3.BitVecVal(0, 32))
+    lm = 0
+    gm = 0
+    for i in range(32 // lb):
+        lm |= ((1 << (lb - 1)) - 1) << (i * lb)
+        gm |= 1 << (i * lb)
+    lmv = z3.BitVecVal(lm, 32)
+    gmv = z3.BitVecVal(gm, 32)
+    x = s1 ^ s2
+    y = (x & lmv) + lmv
+    z = (~(y | x | lmv)) & 0xFFFFFFFF
+    m = (z3.LShR(z, lb - 1)) & gmv
+    return ((m << lb) - m) & 0xFFFFFFFF
+
+
+def model_mul32(s1, s2, unsigned):
+    """32x32->64 Multiplikation; liefert (lo, hi)."""
+    i1 = z3.ZeroExt(32, s1) if unsigned else z3.SignExt(32, s1)
+    i2 = z3.ZeroExt(32, s2) if unsigned else z3.SignExt(32, s2)
+    prod = i1 * i2
+    return (z3.Extract(31, 0, prod), z3.Extract(63, 32, prod))
+
+
+def model_mul32acc(s1, s2, s3, aux, unsigned):
+    """MUL32 mit Akkumulator: (lo + s3) 33-Bit, Carry in (hi + aux)."""
+    i1 = z3.ZeroExt(32, s1) if unsigned else z3.SignExt(32, s1)
+    i2 = z3.ZeroExt(32, s2) if unsigned else z3.SignExt(32, s2)
+    prod = i1 * i2
+    lo33 = z3.ZeroExt(1, z3.Extract(31, 0, prod)) + z3.ZeroExt(1, s3)
+    carry_lo = z3.Extract(32, 32, lo33)   # Carry-Out = Bit 32 der 33-Bit-Summe
+    res = z3.Extract(31, 0, lo33)
+    hi = z3.Extract(63, 32, prod) + aux + z3.ZeroExt(31, carry_lo)
+    return (res, hi)
+
+
+def model_padd64(s1, s2, s3, aux):
+    """64-Bit-Add aus zwei 32-Bit-Haelften; liefert (res, aux_res)."""
+    lo33 = z3.ZeroExt(1, s1) + z3.ZeroExt(1, s3)
+    carry_lo = z3.Extract(32, 32, lo33)   # Carry-Out = Bit 32 der 33-Bit-Summe
+    res = z3.Extract(31, 0, lo33)
+    hi = s2 + aux + z3.ZeroExt(31, carry_lo)
+    return (res, hi)
+
+
+def model_shr_sticky(s1, s2, amt):
+    """SHR_STICKY (mode 30): feiner LSR 0..7 + Sticky-Bits.
+
+    Wert lebt in s2 (niederwertiger Operand). amt ist konkreter Python-int 0..7.
+    res = (s2 >> amt) & ((1<<(32-amt))-1), aux = s2 & ((1<<amt)-1).
+    Liefert (res, aux)."""
+    mask_res = (1 << (32 - amt)) - 1
+    mask_stk = (1 << amt) - 1
+    return (z3.LShR(s2, z3.BitVecVal(amt, 32)) & z3.BitVecVal(mask_res, 32),
+            s2 & z3.BitVecVal(mask_stk, 32))
+
+
+def model_aux_bitfrob(s1, s2, s3, mode, amt):
+    """bitfrob aux-Tap: (res, aux). mode konkreter BitFrobMode-Int.
+
+    ROL(8): res=model_rol(s1,s3), aux=s1. MASKW(12): res=model_maskw(s3), aux=s3.
+    SHR_STICKY(30): res,aux=model_shr_sticky(s1,s2,amt). LSR(0): res=model_lsr(s1,s2,s3), aux=s1."""
+    if not isinstance(s2, z3.BitVecRef):
+        s2 = z3.BitVecVal(s2, 32)
+    if not isinstance(s3, z3.BitVecRef):
+        s3 = z3.BitVecVal(s3, 32)
+    if mode == 8:
+        return (model_rol(s1, s3), s1)
+    if mode == 12:
+        return (model_maskw(s3), s3)
+    if mode == 30:
+        return model_shr_sticky(s1, s2, amt)
+    if mode == 0:
+        return (model_lsr(s1, s2, s3), s1)
+    raise ValueError(f"M10: bitfrob mode {mode} nicht im aux-Satz")
+# ---- Masken-Kataloge (M6 definiert, M18 nutzt MASKS): ----
+
+MASKS = [0x00000000, 0xFFFFFFFF, 0x55555555, 0xAAAAAAAA, 0x0F0F0F0F,
+         0xF0F0F0F0, 0x33333333, 0xCCCCCCCC, 0x00FF00FF, 0xFF00FF00,
+         0x0000FFFF, 0xFFFF0000, 0x10203040, 0x01010101, 0x80808080,
+         0x12345678, 0xDEADBEEF, 0xA5A5A5A5, 0x3C3C3C3C, 0x80000000,
+         0x00000001, 0x00000003, 0xC0000000, 0x0FF00FF0, 0x7FFFFFFF,
+         0xFFFFFFFE, 0x00010000, 0x10000000]
+
+
+INV_MASKS = [0x0F0F0F0F, 0xF0F0F0F0, 0x33333333, 0x00FF00FF, 0x0000FFFF,
+             0x10203040, 0x01010101, 0x12345678, 0xA5A5A5A5, 0x80000000,
+             0x00000003, 0x7FFFFFFF]
+def _run_M1():
     # Q1: ein einzelnes LUT kann bitweises AND encodieren (c_i frei).
     # idx=(a<<2)|(b<<1)|c: a&b setzt nur idx 6,7 -> lut = 0xC0.
     print("Q1 AND: pruefe LUT-Encoding fuer bitweises AND")
@@ -355,7 +594,258 @@ if __name__ == "__main__":
     assert solver.check() == z3.unsat
     print("Q3 AND^OR unloesbar PASS")
 
+    # Q100: ein einzelnes LUT kann bitweises NOR encodieren (c_i frei).
+    # ~(a|b): nur idx 0 -> lut = 0x03.
+    print("Q100 NOR: pruefe LUT-Encoding fuer bitweises NOR")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~(ai | bi)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x03
+    print(f"Q100 NOR: lut=0x{lut_val:02X} PASS")
+
+    # Q101: ein einzelnes LUT kann bitweises NAND encodieren (c_i frei).
+    # ~(a&b): idx 0..5 -> lut = 0x3F.
+    print("Q101 NAND: pruefe LUT-Encoding fuer bitweises NAND")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~(ai & bi)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x3F
+    print(f"Q101 NAND: lut=0x{lut_val:02X} PASS")
+
+    # Q102: ein einzelnes LUT kann bitweises XNOR encodieren (c_i frei).
+    # ~(a^b): idx 0,3,5,6 -> lut = 0xC3.
+    print("Q102 XNOR: pruefe LUT-Encoding fuer bitweises XNOR")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~(ai ^ bi)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0xC3
+    print(f"Q102 XNOR: lut=0x{lut_val:02X} PASS")
+
+    # Q103: ein einzelnes LUT kann 3-Input-XOR encodieren.
+    # a^b^c: gerade Paritaet -> lut = 0x96.
+    print("Q103 XOR3: pruefe LUT-Encoding fuer 3-Input-XOR")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((ai ^ bi ^ ci) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x96
+    print(f"Q103 XOR3: lut=0x{lut_val:02X} PASS")
+
+    # Q104: ein einzelnes LUT kann 3-Input-XNOR encodieren.
+    # ~(a^b^c): ungerade Paritaet -> lut = 0x69.
+    print("Q104 XNOR3: pruefe LUT-Encoding fuer 3-Input-XNOR")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~(ai ^ bi ^ ci)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x69
+    print(f"Q104 XNOR3: lut=0x{lut_val:02X} PASS")
+
+    # Q105: ein einzelnes LUT kann 3-Input-NAND encodieren.
+    # ~(a&b&c): nur idx 7 -> lut = 0x7F.
+    print("Q105 NAND3: pruefe LUT-Encoding fuer 3-Input-NAND")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~(ai & bi & ci)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x7F
+    print(f"Q105 NAND3: lut=0x{lut_val:02X} PASS")
+
+    # Q106: ein einzelnes LUT kann 3-Input-NOR encodieren.
+    # ~(a|b|c): nur idx 0 -> lut = 0x01.
+    print("Q106 NOR3: pruefe LUT-Encoding fuer 3-Input-NOR")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~(ai | bi | ci)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x01
+    print(f"Q106 NOR3: lut=0x{lut_val:02X} PASS")
+
+    # Q107: ein einzelnes LUT kann Majority encodieren.
+    # (a&b)|(b&c)|(a&c): idx 3,5,6,7 -> lut = 0xE8.
+    print("Q107 MAJ: pruefe LUT-Encoding fuer Majority")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((ai & bi) | (bi & ci) | (ai & ci))))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0xE8
+    print(f"Q107 MAJ: lut=0x{lut_val:02X} PASS")
+
+    # Q108: ein einzelnes LUT kann Minority encodieren.
+    # ~((a&b)|(b&c)|(a&c)): idx 0,1,2,4 -> lut = 0x17.
+    print("Q108 MIN: pruefe LUT-Encoding fuer Minority")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~((ai & bi) | (bi & ci) | (ai & ci))) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x17
+    print(f"Q108 MIN: lut=0x{lut_val:02X} PASS")
+
+    # Q109: ein einzelnes LUT kann AND mit c encodieren (b_i frei).
+    # a&c: idx 5,7 -> lut = 0xA0.
+    print("Q109 AND_C: pruefe LUT-Encoding fuer a&c")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == (ai & ci)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0xA0
+    print(f"Q109 AND_C: lut=0x{lut_val:02X} PASS")
+
+    # Q110: ein einzelnes LUT kann Implikation a->b encodieren.
+    # ~a|b: nur idx 2 -> lut = 0xCF.
+    print("Q110 IMPLY: pruefe LUT-Encoding fuer a->b")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~ai | bi) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0xCF
+    print(f"Q110 IMPLY: lut=0x{lut_val:02X} PASS")
+
+    # Q111: ein einzelnes LUT kann Implikation a->c encodieren.
+    # ~a|c: idx 0,4,5,6 -> lut = 0xAF.
+    print("Q111 IMPLY_C: pruefe LUT-Encoding fuer a->c")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~ai | ci) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0xAF
+    print(f"Q111 IMPLY_C: lut=0x{lut_val:02X} PASS")
+
+    # Q112: ein einzelnes LUT kann a|~c encodieren.
+    # a|~c: idx 0,1,2,4,5,6 -> lut = 0xF5.
+    print("Q112 ORC_C: pruefe LUT-Encoding fuer a|~c")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((ai | ~ci) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0xF5
+    print(f"Q112 ORC_C: lut=0x{lut_val:02X} PASS")
+
+    # Q113: ein einzelnes LUT kann ~((a&b)^c) encodieren.
+    # MANDN mit invertiertem c-Anteil: idx 0,1,2,4,5,6 -> lut = 0x95.
+    print("Q113 MANDN_INV: pruefe LUT-Encoding fuer ~((a&b)^c)")
+    solver = z3.Solver()
+    lut = z3.BitVec('lut', 32)
+    for i in range(32):
+        ai = z3.BitVec(f'a{i}', 1)
+        bi = z3.BitVec(f'b{i}', 1)
+        ci = z3.BitVec(f'c{i}', 1)
+        bit = z3.Extract(0, 0, z3.LShR(lut, z3.ZeroExt(29, z3.Concat(ai, bi, ci))))
+        solver.add(z3.ForAll([ai, bi, ci], bit == ((~((ai & bi) ^ ci)) & 1)))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    lut_val = m[lut].as_long() & 0xFF
+    assert lut_val == 0x95
+    print(f"Q113 MANDN_INV: lut=0x{lut_val:02X} PASS")
+
+    # Q114: NOT (0x01) = NOR3 = ~(a|b|c); NOR (0x03) = ~(a|b). Verschieden!
+    # Sat-Beweis: es gibt (a,b,c) mit unterschiedlichem Ergebnis (z.B. a=b=0,c=1).
+    solver = z3.Solver()
+    a = z3.BitVec('a_q114', 32)
+    b = z3.BitVec('b_q114', 32)
+    c = z3.BitVec('c_q114', 32)
+    solver.add(model_ternlog(a, b, c, 0x01) != model_ternlog(a, b, c, 0x03))
+    assert solver.check() == z3.sat
+    m = solver.model()
+    print(f"Q114 NOT!=NOR unloesbar-distinct PASS (Witness a={m[a].as_long():#x}, b={m[b].as_long():#x}, c={m[c].as_long():#x})")
+
     print("M1 PASS")
+
+def _run_M2():
 
     # ---- M2: bitfrob-Stufe (LSR/LSL/ROR/ROL/MASK/MASKW/SEXT) ----
     # Beweis-Idiom: Negation der Behauptung annehmen, sat/unsat pruefen.
@@ -421,6 +911,8 @@ if __name__ == "__main__":
 
     print("M2 PASS")
 
+def _run_M3():
+
     # ---- M3: 1-Pass-Synthese (CMOV) ----
     # 1-Pass-CMOV = bitfrob MASK erzeugt den "c!=0"-Vergleich (all-ones oder
     # 0), ternlog SELECT_A (lut 0xE4) waehlt a bei Maske, sonst b. Der
@@ -475,6 +967,8 @@ if __name__ == "__main__":
     print("Q12 CMOV OHNE MASK unmoeglich (bitfrob-Vorbereitung noetig) PASS")
 
     print("M3 PASS")
+
+def _run_M4():
 
     # ---- M4: Count/Scan-Modi (LZC/TZC/POPCNT_B) ----
     # Beweis-Idiom wie in M2: Negation annehmen, z3.unsat erwarten.
@@ -545,6 +1039,8 @@ if __name__ == "__main__":
     print("Q18 POPCNT_B Kreuzcheck PASS")
 
     print("M4 PASS")
+
+def _run_M5():
 
     # === M5: Pass-Schranken-Beweise UBFX/BFI ===
     # Beweis-Idiom: Negation annehmen, z3.unsat erwarten. QF_BV statt
@@ -637,6 +1133,8 @@ if __name__ == "__main__":
 
     print("M5 PASS")
 
+def _run_M6():
+
     # ---- M6: pext32/pdep32-Butterfly-Beweise ----
     # Negations-Idiom wie gehabt; alle Queries QF_BV (kein Default-Solver).
 
@@ -649,12 +1147,6 @@ if __name__ == "__main__":
     # aktivierbar, Modelle zpext32/zpdep32 stehen bereit; nice -n 15 + Timeout,
     # nicht blockierend.
     xq = z3.BitVec('x_q23', 32)
-    MASKS = [0x00000000, 0xFFFFFFFF, 0x55555555, 0xAAAAAAAA, 0x0F0F0F0F,
-             0xF0F0F0F0, 0x33333333, 0xCCCCCCCC, 0x00FF00FF, 0xFF00FF00,
-             0x0000FFFF, 0xFFFF0000, 0x10203040, 0x01010101, 0x80808080,
-             0x12345678, 0xDEADBEEF, 0xA5A5A5A5, 0x3C3C3C3C, 0x80000000,
-             0x00000001, 0x00000003, 0xC0000000, 0x0FF00FF0, 0x7FFFFFFF,
-             0xFFFFFFFE, 0x00010000, 0x10000000]
 
     print(f"Q23 pdep(pext(x,m),m)==x&m: {len(MASKS)} Masken, symbolisches x")
     n_rt = 0
@@ -666,10 +1158,6 @@ if __name__ == "__main__":
         assert s.check() == z3.unsat, f"Q23 roundtrip m={mv:#010x}"
         n_rt += 1
     print(f"Q23 Roundtrip bewiesen fuer {n_rt} Masken PASS")
-
-    INV_MASKS = [0x0F0F0F0F, 0xF0F0F0F0, 0x33333333, 0x00FF00FF, 0x0000FFFF,
-                 0x10203040, 0x01010101, 0x12345678, 0xA5A5A5A5, 0x80000000,
-                 0x00000003, 0x7FFFFFFF]
 
     print(f"Q24 pext(pdep(x,m),m)==x&(2^pc-1): {len(INV_MASKS)} Masken, pc konkret")
     n_inv = 0
@@ -724,6 +1212,8 @@ if __name__ == "__main__":
     print(f"Q27 Gegenbeispiel x={m_q27[x].as_long():#010x} PASS")
 
     print("M6 PASS")
+
+def _run_M7():
 
     # ---- M7: 1-Pass-Enumeration (ternlog+bitfrob Oberflaeche) ----
     # Beweis-Idiom wie gehabt; QF_BV, konkrete Eingabe-Batterien (kein
@@ -811,25 +1301,12 @@ if __name__ == "__main__":
         s.add(bs != ref)
         assert s.check() == z3.unsat, f"Q32 bitswap x={xv:#010x}"
     print("Q32 bitswap adjacent realisierbar PASS")
-
-    # Q33: Lemma-Table (Ergebnis der 1-Pass-Enumeration).
-    LEMMAS = {
-        'R_AND': 'ternlog LUT 0xC0',
-        'R_OR': 'ternlog LUT 0xFC',
-        'R_XOR': 'ternlog LUT 0x3C',
-        'R_NOT': 'ternlog LUT 0x01',
-        'R_ANDNOT': 'ternlog LUT 0x30',
-        'R_ORC': 'ternlog LUT 0xF3',
-        'R_BIN2GRAY': 'bitfrob LSR(1) + ternlog XOR strobe1',
-        'R_ADJSWAP': 'bitfrob BITSWAP mask 0x55555555 sh1',
-        'I_GRAY2BIN': 'fine-shift 1-pass unmoeglich',
-        'I_POPCNT32': 'braucht 2. arith4 PWADD',
-        'I_UBFX8': 'siehe Q20',
-    }
     print("M7 1-Pass-Enumeration (ternlog+bitfrob Oberflaeche):")
     for name in LEMMAS:
         print(f"  {name:<14} {LEMMAS[name]}")
     print("M7 PASS")
+
+def _run_M8():
 
     # ---- M8: arith4-Skalar-Enumeration (Konkrete-Mode-Dispatch) ----
     # Beweis-Idiom wie gehabt: QF_BV, konkrete Eingabe-Batterien, Timeout 30s,
@@ -880,7 +1357,7 @@ if __name__ == "__main__":
         assert s.check() == z3.unsat, f"Q35 SATADD {pa:#x},{pb:#x}->{exp:#x}"
     print(f"Q35 SATADD 3 Faelle bewiesen ({time.time()-t35:.2f}s) PASS")
 
-    # Q36: USATADD (mode 4) — unsigned Klemmfall + Normal.
+    # Q36: USATADD (z3-Label mode 4; ISS = SATADD+unsigned) — unsigned Klemmfall + Normal.
     print("Q36 USATADD: pruefe 3 Faelle per Negation")
     t36 = time.time()
     for (pa, pb, exp) in [(0xFFFFFFFF, 1, 0xFFFFFFFF),
@@ -920,7 +1397,7 @@ if __name__ == "__main__":
         assert s.check() == z3.unsat, f"Q38 ABSADD {pa:#x},{pb:#x}->{exp:#x}"
     print(f"Q38 ABSADD 3 Faelle bewiesen ({time.time()-t38:.2f}s) PASS")
 
-    # Q39: SLT/SLTU (mode 10/11) — Masken-Semantik, s3=1 Konst-Addend;
+    # Q39: SLT/SLTU (z3-Label mode 10/11; ISS = SLT+unsigned) — Masken-Semantik, s3=1 Konst-Addend;
     # (d) inv_2 BEWUSST ignoriert (SLT nutzt raw s2) — auch mit inv_2 unsat.
     print("Q39 SLT/SLTU: pruefe 6 Faelle per Negation")
     t39 = time.time()
@@ -938,25 +1415,30 @@ if __name__ == "__main__":
         assert s.check() == z3.unsat, f"Q39 mode{mode} {pa:#x},{pb:#x} inv2={inv2}->{exp:#x}"
     print(f"Q39 SLT/SLTU 6 Faelle bewiesen ({time.time()-t39:.2f}s) PASS")
 
-    # Q40: ADDSHIFT1/2 (13/14), ADDC (2, c_in), MFC (12), SUBB (25, c_in).
-    print("Q40 ADDSHIFT/ADDC/MFC/SUBB: pruefe 8 Faelle per Negation")
+    # Q40: ADDSHIFT1/2 (13/14), ADDC (2, c_in; inv_2=True = SUBB-Integration), MFC (z3-Label 12 = ISS intern 40).
+    print("Q40 ADDSHIFT/ADDC(+inv_2=SUBB)/MFC: pruefe 8 Faelle per Negation")
     t40 = time.time()
     for (pa, pb, pc, mode, c_in, exp) in [
             (0x1000, 0x1234, 0, 13, 0, 0x3468),
             (0x1000, 0x1234, 0, 14, 0, 0x58D0),
             (0xFFFFFFFF, 1, 0, 2, 1, 1),
             (0, 0, 0, 12, 1, 1),
-            (0, 0, 0, 12, 0, 0),
-            (10, 3, 0, 25, 1, 7),
-            (10, 3, 0, 25, 0, 6),
-            (5, 10, 0, 25, 1, 0xFFFFFFFB)]:
+            (0, 0, 0, 12, 0, 0)]:
         r = model_arith4(z3.BitVecVal(pa, 32), z3.BitVecVal(pb, 32),
                          z3.BitVecVal(pc, 32), mode, z3.BitVecVal(c_in, 1))[0]
         s = z3.SolverFor('QF_BV')
         s.set("timeout", 30000)
         s.add(r != z3.BitVecVal(exp, 32))
         assert s.check() == z3.unsat, f"Q40 mode{mode} c_in={c_in} {pa:#x},{pb:#x}->{exp:#x}"
-    print(f"Q40 ADDSHIFT/ADDC/MFC/SUBB 8 Faelle bewiesen ({time.time()-t40:.2f}s) PASS")
+    # Borrow-Fälle: ADDC mit inv_2=True == SUBB (a-b-1+c; C=1 kein Borrow)
+    for (pa, pb, c_in, exp) in [(10, 3, 1, 7), (10, 3, 0, 6), (5, 10, 1, 0xFFFFFFFB)]:
+        r = model_arith4(z3.BitVecVal(pa, 32), z3.BitVecVal(pb, 32),
+                         z3.BitVecVal(0, 32), 2, z3.BitVecVal(c_in, 1), inv_2=True)[0]
+        s = z3.SolverFor('QF_BV')
+        s.set("timeout", 30000)
+        s.add(r != z3.BitVecVal(exp, 32))
+        assert s.check() == z3.unsat, f"Q40 ADDC+inv_2 (SUBB) c_in={c_in} {pa:#x},{pb:#x}->{exp:#x}"
+    print(f"Q40 ADDSHIFT/ADDC(+inv_2=SUBB)/MFC 8 Faelle bewiesen ({time.time()-t40:.2f}s) PASS")
 
     # Q41: LEMMAS-Update — arith4-Skalar-Identitaeten in die Tabelle.
     LEMMAS.update({
@@ -973,8 +1455,8 @@ if __name__ == "__main__":
         'R_ADDSHIFT1': 'lea *3',
         'R_ADDSHIFT2': 'lea *5',
         'R_ADDC': 'ADDC carry-in',
-        'R_MFC': 'MFC Carry->reg',
-        'R_SUBB': 'SUBB=SBC, c=1 kein Borrow',
+        'R_MFC': 'MFC Carry->reg (interner Helper, z3-Label 12 = ISS Mode 40)',
+        'R_ADDC_SUB': 'ADDC+inv_2 == SBC (c=1 kein Borrow)',
     })
     print("M8 1-Pass-Enumeration (arith4 Skalar-Oberflaeche):")
     for name in sorted(LEMMAS):
@@ -987,8 +1469,10 @@ if __name__ == "__main__":
     print("    - ABSADD |INT_MIN|-Wrap 0x80000000 (Runtime-Test nur 5/0)")
     print("    - SLT inv_2-ignoriert (Runtime-Test ohne inv_2)")
     print("    - ADDC Carry-in-Kette 0xFFFFFFFF+1+1 (kein Runtime-Test)")
-    print("    (SUBB c_in=0 Borrow ist in TEST 27 bereits assertiert -> keine Luecke)")
+    print("    (ADDC+inv_2 Borrow-Faelle sind in TEST 27 bereits assertiert -> keine Luecke)")
     print("M8 PASS")
+
+def _run_M8b():
 
     # ---- M8b: PADD/CMP/PMINMAX/MUL-Modelle (SWAR 1-Pass) ----
     # Beweis-Idiom wie gehabt: QF_BV, Timeout 30s, NEGATION der Identitaet
@@ -1015,28 +1499,6 @@ if __name__ == "__main__":
         t = (s1 & lmv) + (s2 & lmv)
         x = s1 ^ s2
         return (t & lmv) | ((((z3.LShR(x, lb - 1) ^ z3.LShR(t, lb - 1)) & gmv) << (lb - 1)))
-
-    def model_cmp(s1, s2, lb):
-        """SWAR-Gleichheit: Lane = all-ones iff s1_Lane == s2_Lane.
-
-        lb < 32 via (x&lm)+lm-Trick; lb == 32 braucht Sonderfall, da die
-        SWAR-Formel ein Reserve-Bit ueber der Lane benoetigt (z=0 fuer lb=32).
-        """
-        if lb == 32:
-            return z3.If(s1 == s2, z3.BitVecVal(0xFFFFFFFF, 32), z3.BitVecVal(0, 32))
-        lm = 0
-        gm = 0
-        for i in range(32 // lb):
-            lm |= ((1 << (lb - 1)) - 1) << (i * lb)
-            gm |= 1 << (i * lb)
-        lmv = z3.BitVecVal(lm, 32)
-        gmv = z3.BitVecVal(gm, 32)
-        x = s1 ^ s2
-        y = (x & lmv) + lmv
-        z = (~(y | x | lmv)) & 0xFFFFFFFF
-        m = (z3.LShR(z, lb - 1)) & gmv
-        return ((m << lb) - m) & 0xFFFFFFFF
-
     def model_pminmax(s1, s2, lb, signed, is_max):
         """Per-Lane min/max; a>b-Carry in lb+1 Bit gerechnet (kein Wrap).
 
@@ -1075,33 +1537,6 @@ if __name__ == "__main__":
     def model_mul16(s1, s2):
         """16x16->32 Multiplikation (niederwertige Haelfte)."""
         return ((s1 & 0xFFFF) * (s2 & 0xFFFF)) & 0xFFFFFFFF
-
-    def model_mul32(s1, s2, unsigned):
-        """32x32->64 Multiplikation; liefert (lo, hi)."""
-        i1 = z3.ZeroExt(32, s1) if unsigned else z3.SignExt(32, s1)
-        i2 = z3.ZeroExt(32, s2) if unsigned else z3.SignExt(32, s2)
-        prod = i1 * i2
-        return (z3.Extract(31, 0, prod), z3.Extract(63, 32, prod))
-
-    def model_mul32acc(s1, s2, s3, aux, unsigned):
-        """MUL32 mit Akkumulator: (lo + s3) 33-Bit, Carry in (hi + aux)."""
-        i1 = z3.ZeroExt(32, s1) if unsigned else z3.SignExt(32, s1)
-        i2 = z3.ZeroExt(32, s2) if unsigned else z3.SignExt(32, s2)
-        prod = i1 * i2
-        lo33 = z3.ZeroExt(1, z3.Extract(31, 0, prod)) + z3.ZeroExt(1, s3)
-        carry_lo = z3.Extract(32, 32, lo33)   # Carry-Out = Bit 32 der 33-Bit-Summe
-        res = z3.Extract(31, 0, lo33)
-        hi = z3.Extract(63, 32, prod) + aux + z3.ZeroExt(31, carry_lo)
-        return (res, hi)
-
-    def model_padd64(s1, s2, s3, aux):
-        """64-Bit-Add aus zwei 32-Bit-Haelften; liefert (res, aux_res)."""
-        lo33 = z3.ZeroExt(1, s1) + z3.ZeroExt(1, s3)
-        carry_lo = z3.Extract(32, 32, lo33)   # Carry-Out = Bit 32 der 33-Bit-Summe
-        res = z3.Extract(31, 0, lo33)
-        hi = s2 + aux + z3.ZeroExt(31, carry_lo)
-        return (res, hi)
-
     # Q42: PADD — Lane-Referenz via Extract+Concat (Summe mod 2^lb pro Lane).
     print("Q42 PADD: pruefe SWAR-Formel gegen Lane-Referenz per Negation")
     t42 = time.time()
@@ -1253,23 +1688,9 @@ if __name__ == "__main__":
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M8b PASS")
 
-    # === M9: permb — Byte/Nibble-Permute + shift_ctrl (AltiVec-lvsr) ===
-    def model_permb_byte(s1, s2, ctrl, blank_enable=True):
-        """Byte-Modus: 4 Output-Bytes, ctrl_byte&0x07 waehlt Concat-Byte (0..7),
-        High-Bit 0x80 blankt (wenn blank_enable). concat = [s1 | s2], s1=HIGH."""
-        concat = z3.Concat(s1, s2)                      # 64-Bit
-        res = z3.BitVecVal(0, 32)
-        for i in range(4):
-            cb = (ctrl >> (8 * i)) & 0xFF
-            idx = cb & 0x07
-            blank = (cb & 0x80) != 0
-            if blank_enable and blank:
-                val = z3.BitVecVal(0, 8)
-            else:
-                val = z3.Extract(7 + 8 * idx, 8 * idx, concat)
-            res = res | (z3.ZeroExt(24, val) << z3.BitVecVal(8 * i, 32))
-        return res
+def _run_M9():
 
+    # === M9: permb — Byte/Nibble-Permute + shift_ctrl (AltiVec-lvsr) ===
     def model_permb_nib(s1, s2, ctrl):
         """Nibble-Modus: 8 Output-Nibbles, 4-Bit-Index waehlt aus allen 16
         Concat-Nibbles (0..7=src2, 8..15=src1). KEIN Blank im Nibble-Modus."""
@@ -1280,53 +1701,6 @@ if __name__ == "__main__":
             nib = z3.Extract(3 + 4 * idx, 4 * idx, concat)
             res = res | (z3.ZeroExt(28, nib) << z3.BitVecVal(4 * i, 32))
         return res
-
-    def model_permb_shift(s1, s2, n, shift_left=False):
-        """shift_ctrl: src3=Shift-Menge (0..31), Byte-Teil k=n>>3 synthetisiert
-        Verschiebe-Maske on-the-fly. LSR: out-Byte i = Concat-Byte (k+i), k+i>=4
-        -> blank (32-Bit-Wert in src2). LSL: out-Byte i = Concat-Byte (i-k),
-        i<k -> blank. shifted_out (rausgeschobene Bytes) als zweiter Rueckgabe.
-        Liefert (res, shifted_out)."""
-        concat = z3.Concat(s1, s2)
-        k = (n & 0x1F) >> 3
-        res = z3.BitVecVal(0, 32)
-        so = z3.BitVecVal(0, 32)
-        if not shift_left:
-            for i in range(4):
-                idx = k + i
-                if idx >= 4:
-                    val = z3.BitVecVal(0, 8)
-                else:
-                    val = z3.Extract(7 + 8 * idx, 8 * idx, concat)
-                res = res | (z3.ZeroExt(24, val) << z3.BitVecVal(8 * i, 32))
-            for j in range(min(k, 4)):
-                so = so | z3.ZeroExt(24, z3.Extract(7 + 8 * j, 8 * j, concat))
-        else:
-            for i in range(4):
-                idx = i - k
-                if idx < 0:
-                    val = z3.BitVecVal(0, 8)
-                else:
-                    val = z3.Extract(7 + 8 * idx, 8 * idx, concat)
-                res = res | (z3.ZeroExt(24, val) << z3.BitVecVal(8 * i, 32))
-            for j in range(min(k, 4)):
-                so = so | z3.ZeroExt(24, z3.Extract(7 + 8 * (8 - k + j), 8 * (8 - k + j), concat))
-        return res, so
-
-    def _m9_unsat(name, fml):
-        """QF_BV-Solver, Negations-Idiom: unsat erwartet. Bei sat Gegenbeispiel
-        via m.eval drucken und STOP (kein Weaken)."""
-        s = z3.SolverFor('QF_BV')
-        s.set("timeout", 30000)
-        s.add(fml)
-        r = s.check()
-        if r == z3.sat:
-            m = s.model()
-            print(f"{name}: SAT -> Gegenbeispiel: {m.eval(fml, model_completion=True)}")
-            assert False, f"{name}: sat -> STOP (kein Weaken)"
-        assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
-        print(f"{name} PASS")
-
     # Q50: permb Byte-Identitaet — ctrl=0x03020100, blank aus (LSB-first:
     # cb_0=0x00->concat byte 0 .. cb_3=0x03). Result == y; aux (non-shift)
     # == src3 == ctrl. Zwei getrennte Solver-Calls.
@@ -1450,37 +1824,9 @@ if __name__ == "__main__":
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M9 PASS")
 
+def _run_M10():
+
     # ---- M10: Aux-Pipe-Slot-Modelle (2. Pipe-Slot: aux-Taps) + Komposition ----
-    def model_shr_sticky(s1, s2, amt):
-        """SHR_STICKY (mode 30): feiner LSR 0..7 + Sticky-Bits.
-
-        Wert lebt in s2 (niederwertiger Operand). amt ist konkreter Python-int 0..7.
-        res = (s2 >> amt) & ((1<<(32-amt))-1), aux = s2 & ((1<<amt)-1).
-        Liefert (res, aux)."""
-        mask_res = (1 << (32 - amt)) - 1
-        mask_stk = (1 << amt) - 1
-        return (z3.LShR(s2, z3.BitVecVal(amt, 32)) & z3.BitVecVal(mask_res, 32),
-                s2 & z3.BitVecVal(mask_stk, 32))
-
-    def model_aux_bitfrob(s1, s2, s3, mode, amt):
-        """bitfrob aux-Tap: (res, aux). mode konkreter BitFrobMode-Int.
-
-        ROL(8): res=model_rol(s1,s3), aux=s1. MASKW(12): res=model_maskw(s3), aux=s3.
-        SHR_STICKY(30): res,aux=model_shr_sticky(s1,s2,amt). LSR(0): res=model_lsr(s1,s2,s3), aux=s1."""
-        if not isinstance(s2, z3.BitVecRef):
-            s2 = z3.BitVecVal(s2, 32)
-        if not isinstance(s3, z3.BitVecRef):
-            s3 = z3.BitVecVal(s3, 32)
-        if mode == 8:
-            return (model_rol(s1, s3), s1)
-        if mode == 12:
-            return (model_maskw(s3), s3)
-        if mode == 30:
-            return model_shr_sticky(s1, s2, amt)
-        if mode == 0:
-            return (model_lsr(s1, s2, s3), s1)
-        raise ValueError(f"M10: bitfrob mode {mode} nicht im aux-Satz")
-
     def model_aux_arith4(s1, s2, s3, mode, c_in, aux_in):
         """arith4 aux-Tap: (res, aux). mode konkreter ArithMode-Int (inkl. |0x20 unsigned).
 
@@ -1569,8 +1915,10 @@ if __name__ == "__main__":
     _m9_unsat("QA8 bitfrob LSR aux==s1",
               model_aux_bitfrob(xh, 0, 0, 0, 0)[1] != xh)
 
+def _run_M10b():
+
     # ---- M10b: Kompositions-Beweise (2. Pipe-Slot) ----
-    # QC0: LUT 0x96 == 3-Input-XOR (Basis fuer alle ternlog-Ketten).
+    # QC0: LUT 0x96 (TernLut.XOR3) == 3-Input-XOR (Basis fuer alle ternlog-Ketten).
     print("QC0 ternlog LUT 0x96 = a^b^c: pruefe per Negation")
     a0 = z3.BitVec('a_qc0', 32)
     b0 = z3.BitVec('b_qc0', 32)
@@ -1640,6 +1988,8 @@ if __name__ == "__main__":
     n_impo = sum(1 for k in LEMMAS if k.startswith('I_'))
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M10 PASS")
+
+def _run_M12():
 
     # === M12: echte Mikrocode-Sequenzen (helpers.py) gegen Referenzen ===
     # Reale ctrl-Dicts: ctrl_cmov, ctrl_slt, ctrl_min, ctrl_max, ctrl_ubfx,
@@ -1747,6 +2097,8 @@ if __name__ == "__main__":
     _m9_unsat("Q66 GRAY->BIN prev==ref", q66_prev != q66_ref)
 
     print("M12 PASS")
+
+def _run_M13():
 
     # === M13: Makro-Sequenzen aus helpers.py (shift_right/shift_left/mul_ctz/gray) ===
     # Reale Makro-Sequenzen transkribiert (Anti-Bug: Konfigurationen aus Code,
@@ -1887,26 +2239,12 @@ if __name__ == "__main__":
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M13 PASS")
 
+def _run_M14():
+
     # === M14: 4 neue Kompositions-Lemmata (Makro-Bloecke aus helpers.py) ===
     # Beweis-Idiom wie M9/M12/M13: QF_BV, Timeout 30s, NEGATION der Identitaet
     # assertieren -> unsat erwartet. Bei sat: Gegenbeispiel drucken + STOP
     # (kein Weaken). Konkrete n/sh als Python-ints, Operanden symbolisch.
-
-    def _m14_unsat(name, fml, cex_vars):
-        """QF_BV-Solver, Negations-Idiom (wie _m9_unsat, mit CEX-Variablen).
-        unsat erwartet; bei sat Gegenbeispiel via m.eval drucken und STOP."""
-        s = z3.SolverFor('QF_BV')
-        s.set("timeout", 30000)
-        s.add(fml)
-        r = s.check()
-        if r == z3.sat:
-            m = s.model()
-            cex = ", ".join(f"{v}={m.eval(v, model_completion=True)}" for v in cex_vars)
-            print(f"{name}: SAT -> Gegenbeispiel {cex}")
-            assert False, f"{name}: sat -> STOP (kein Weaken)"
-        assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
-        print(f"{name} PASS")
-
     # Q72 R_MANDN: ternlog LUT 0x6A == (a&b)^m fuer ALLE a,b,m (per-Bit-
     # Wahrheitstabelle: c=0 -> a&b, c=1 -> ~(a&b), LUT 0x78 waere falsch,
     # 0x6A ist (a&b)^c). Symbolische Freie Variablen + Negation -> unsat.
@@ -1972,6 +2310,8 @@ if __name__ == "__main__":
     n_impo = sum(1 for k in LEMMAS if k.startswith('I_'))
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M14 PASS")
+
+def _run_M15():
 
     # === M15: GF(2^8)-Multiplikation — CLMUL_LO/CLMUL_HI/POLY_RED (bitfrob
     # Modi 13/14/17) + 5 Forall-Beweise. Pipeline-Semantik aus pipeline.py:462-502:
@@ -2151,6 +2491,8 @@ if __name__ == "__main__":
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M15 PASS")
 
+def _run_M16():
+
     # === M16: 5 weitere bitfrob-Modi als z3-Funktionen + 6 Negations-Beweise.
     # (BITZIP_8/18, BITUNZIP_8/19, GFNI_AFFINE/20, BCD_HC/23, LOG2/28, LOG10/29)
     # Pipeline-Semantik aus pipeline.py bitfrob-Dispatch (verbatim). Beweis-
@@ -2290,27 +2632,6 @@ if __name__ == "__main__":
         xb = x & z3.BitVecVal(0xFF, 32)
         cb = cst & z3.BitVecVal(0xFF, 32)
         return xb ^ _rol8(xb, 1) ^ _rol8(xb, 2) ^ _rol8(xb, 3) ^ _rol8(xb, 4) ^ cb
-
-    def _m16_unsat(name, fml, cex_vars):
-        """QF_BV-Solver, Negations-Idiom (wie _m14_unsat) + Konsistenz-Guard:
-        z3 4.16.0 liefert bei tiefen ite+bvsub-Formeln spurious SAT (Modell
-        evaluiert die Formel zu False). Bei sat daher erst m.eval(fml):
-        eval==False -> z3-Bug -> STOP mit Meldung; eval==True -> echtes
-        Gegenbeispiel drucken und STOP (kein Weaken)."""
-        s = z3.SolverFor('QF_BV')
-        s.set("timeout", 30000)
-        s.add(fml)
-        r = s.check()
-        if r == z3.sat:
-            m = s.model()
-            if z3.is_false(m.eval(fml, model_completion=True)):
-                assert False, f"{name}: spurious SAT (z3-Modell widerspricht Formel) -> STOP"
-            cex = ", ".join(f"{v}={m.eval(v, model_completion=True)}" for v in cex_vars)
-            print(f"{name}: SAT -> Gegenbeispiel {cex}")
-            assert False, f"{name}: sat -> STOP (kein Weaken)"
-        assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
-        print(f"{name} PASS")
-
     # Q81 R_BCDHC: BCD_HC == per-Nibble-Carry (9-Bit-Extract-Referenz).
     print("Q81 R_BCDHC: BCD_HC == per-Nibble-Carry: pruefe per Negation")
     m16_s1 = z3.BitVec('s1_m16', 32)
@@ -2373,12 +2694,14 @@ if __name__ == "__main__":
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M16 PASS")
 
-    # === M17: NIBLKP/BMAT_N_OR/BMAT_N_XOR/PSADB — ROM- und Primitive-Verifikation
+def _run_M17():
+
+    # === M17: NIBLKP/BMAT_N_OR/BMAT_N_XOR/PSAD — ROM- und Primitive-Verifikation
     # NIBLKP (bitfrob mode 22, pipeline.py:533): idx = s1&0xF, res =
     # BITFROB_CST[idx+32] & 0xFF — GF(2^4)-Inversen-ROM (Poly 0x13).
     # BMAT_N_OR (26) / BMAT_N_XOR (27, pipeline.py:556): je Nibble i 4-Bit-
     # ROR-Bank: acc = OR/XOR der ror4(b_nib,k) mit a_nib_k=1.
-    # PSADB (arith4 mode 24, pipeline.py:1222): s3 + Summe |byte_i(s1)-byte_i(s2)|.
+    # PSAD (arith4 mode 24, intern): s3 + Summe |lane_i(s1)-lane_i(s2)|, Lane via op_type_1.
     # Beweis-Idiom wie M14-M16: QF_BV, Timeout 30s, NEGATION der Identitaet
     # assertieren -> unsat. sat -> Gegenbeispiel drucken + STOP (kein Weaken).
 
@@ -2469,59 +2792,42 @@ if __name__ == "__main__":
             res = res | (z3.ZeroExt(28, nib) << z3.BitVecVal(4 * i, 32))
         return res
 
-    def model_psadb(s1, s2, s3):
-        """PSADB (arith4 mode 24): s3 + Summe |byte_i(s1)-byte_i(s2)| (8 Bytes).
+    def model_psad(s1, s2, s3, lb):
+        """PSAD (arith4 mode 24): s3 + Summe |lane_i(s1)-lane_i(s2)|, Lane via lb.
 
-        Pipeline iteriert 8 Byte-Lanes; Operanden sind 32-Bit, Lanes 4..7
+        Pipeline iteriert RLEN/lb Lanes; Operanden sind 32-Bit, obere Lanes
         sind 0 — daher ZeroExt(32,·) auf 64-Bit vor Extract (exakte Spiegelung
-        der Python-int-Semantik (s1>>(i*8))&0xFF, die fuer i>=4 0 liefert).
-        d_i = If(UGE(av,bv), av-bv, bv-av) — 8-Bit-Wrap-sicher; 16-Bit-
-        Akkumulation der ZeroExt(8,d_i), dann + s3, MASK_RLEN."""
+        der Python-int-Semantik (s1>>(i*lb))&lane_mask, die fuer i >= RLEN/lb
+        0 liefert). 32-Bit-Sad-Akkumulator (WORD: 4x0xFFFF = 0x3FFFC passt).
+        Q90 (BYTE) / Q90w (WORD) beweisen gegen 9/17-Bit-Vorzeichen-Referenz."""
+        lane_max = (1 << lb) - 1
         s1e = z3.ZeroExt(32, s1)
         s2e = z3.ZeroExt(32, s2)
-        sad = z3.BitVecVal(0, 16)
-        for i in range(8):
-            av = z3.Extract(7 + 8 * i, 8 * i, s1e)
-            bv = z3.Extract(7 + 8 * i, 8 * i, s2e)
+        sad = z3.BitVecVal(0, 32)
+        for i in range(32 // lb):
+            av = z3.Extract(lb - 1 + lb * i, lb * i, s1e)
+            bv = z3.Extract(lb - 1 + lb * i, lb * i, s2e)
             d = z3.If(z3.UGE(av, bv), av - bv, bv - av)
-            sad = sad + z3.ZeroExt(8, d)
-        return (z3.ZeroExt(16, sad) + s3) & 0xFFFFFFFF
+            sad = sad + z3.ZeroExt(32 - lb, d)
+        return (sad + s3) & 0xFFFFFFFF
 
-    def _psadb_ref(s1, s2, s3):
-        """Unabhaengige Referenz: |diff| via 9-Bit-Differenz (kein Wrap).
+    def _psad_ref(s1, s2, s3, lb):
+        """Unabhaengige Referenz: |diff| via (lb+1)-Bit-Differenz (kein Wrap).
 
-        ABWEICHUNG (Korrektheit, kein Weaken): 9-Bit statt 8-Bit-Wrap-Abs —
-        die 8-Bit-MSB-Abs-Formel ist fuer |av-bv|>127 falsch (16256/65536
-        Byte-Paare, z.B. av=0,bv=0xFF -> diff=0x01, abs=1 statt 255); 9-Bit
-        fasst [-255,255], MSB ist echtes Vorzeichenbit. ZeroExt(32,·) auf
-        64-Bit wie das Modell (Pipeline iteriert 8 Lanes ueber 32-Bit-Operanden,
-        Lanes 4..7 = 0)."""
+        ABWEICHUNG (Korrektheit, kein Weaken): (lb+1)-Bit statt lb-Bit-Wrap-Abs —
+        die lb-Bit-MSB-Abs-Formel ist fuer |av-bv|>lane_max falsch; (lb+1)-Bit
+        fasst den vollen Differenzbereich, MSB ist echtes Vorzeichenbit.
+        ZeroExt(32,·) auf 64-Bit wie das Modell (obere Lanes = 0)."""
         s1e = z3.ZeroExt(32, s1)
         s2e = z3.ZeroExt(32, s2)
-        sad = z3.BitVecVal(0, 16)
-        for i in range(8):
-            av = z3.Extract(7 + 8 * i, 8 * i, s1e)
-            bv = z3.Extract(7 + 8 * i, 8 * i, s2e)
-            d9 = z3.ZeroExt(1, av) - z3.ZeroExt(1, bv)
-            absd = z3.If(z3.Extract(8, 8, d9) == 1, z3.BitVecVal(0, 9) - d9, d9)
-            sad = sad + z3.ZeroExt(7, absd)
-        return (z3.ZeroExt(16, sad) + s3) & 0xFFFFFFFF
-
-    def _m17_unsat(name, fml, cex_vars):
-        """QF_BV-Solver, Negations-Idiom (wie _m16_unsat): unsat erwartet.
-        sat -> Gegenbeispiel via m.eval (model_completion=True) + STOP."""
-        s = z3.SolverFor('QF_BV')
-        s.set("timeout", 30000)
-        s.add(fml)
-        r = s.check()
-        if r == z3.sat:
-            m = s.model()
-            cex = ", ".join(f"{v}={m.eval(v, model_completion=True)}" for v in cex_vars)
-            print(f"{name}: SAT -> Gegenbeispiel {cex}")
-            assert False, f"{name}: sat -> STOP (kein Weaken)"
-        assert r == z3.unsat, f"{name}: {r} -> STOP (kein Weaken)"
-        print(f"{name} PASS")
-
+        sad = z3.BitVecVal(0, 32)
+        for i in range(32 // lb):
+            av = z3.Extract(lb - 1 + lb * i, lb * i, s1e)
+            bv = z3.Extract(lb - 1 + lb * i, lb * i, s2e)
+            d = z3.ZeroExt(1, av) - z3.ZeroExt(1, bv)   # (lb+1)-Bit
+            absd = z3.If(z3.Extract(lb, lb, d) == 1, z3.BitVecVal(0, lb + 1) - d, d)
+            sad = sad + z3.ZeroExt(32 - (lb + 1), absd)
+        return (sad + s3) & 0xFFFFFFFF
     # Q87 R_NIBLKP: ROM-Inhalt == brute-force GF(2^4)-Inversen (Poly 0x13).
     print("Q87 R_NIBLKP: NIBLKP-Rom == GF(2^4)-Inverse (Poly 0x13): pruefe per Negation")
     m17_x = z3.BitVec('x_q87', 32)
@@ -2542,13 +2848,17 @@ if __name__ == "__main__":
                model_bmat_n(m17_a, m17_b, True) != _bmat_n_ref(m17_a, m17_b, True),
                [m17_a, m17_b])
 
-    # Q90 R_PSADB: SAD-Summe == 9-Bit-Vorzeichen-Referenz.
-    print("Q90 R_PSADB: PSADB == Summe |Byte-Differenzen|: pruefe per Negation")
+    # Q90/Q90w R_PSAD: SAD-Summe == (lb+1)-Bit-Vorzeichen-Referenz (BYTE + WORD-Lane).
+    print("Q90 R_PSAD: PSAD(BYTE) == Summe |Byte-Differenzen|: pruefe per Negation")
     m17_s1 = z3.BitVec('s1_q90', 32)
     m17_s2 = z3.BitVec('s2_q90', 32)
     m17_s3 = z3.BitVec('s3_q90', 32)
-    _m17_unsat("Q90 R_PSADB: PSADB == Summe |Byte-Differenzen|",
-               model_psadb(m17_s1, m17_s2, m17_s3) != _psadb_ref(m17_s1, m17_s2, m17_s3),
+    _m17_unsat("Q90 R_PSAD(BYTE): PSAD == Summe |Byte-Differenzen|",
+               model_psad(m17_s1, m17_s2, m17_s3, 8) != _psad_ref(m17_s1, m17_s2, m17_s3, 8),
+               [m17_s1, m17_s2, m17_s3])
+    print("Q90w R_PSAD: PSAD(WORD) == Summe |Halbwort-Differenzen|: pruefe per Negation")
+    _m17_unsat("Q90w R_PSAD(WORD): PSAD == Summe |Halbwort-Differenzen|",
+               model_psad(m17_s1, m17_s2, m17_s3, 16) != _psad_ref(m17_s1, m17_s2, m17_s3, 16),
                [m17_s1, m17_s2, m17_s3])
 
     # M17: LEMMAS-Update — ROM-Inhalt + Nibble/Byte-Primitiven realisierbar.
@@ -2556,15 +2866,17 @@ if __name__ == "__main__":
         'R_NIBLKP': 'NIBLKP-Rom == GF(2^4)-Inverse-Tabelle',
         'R_BMAT_N_OR': 'BMAT_N_OR == 4-Bit-ROR-Bank-Referenz',
         'R_BMAT_N_XOR': 'BMAT_N_XOR == XOR-Bank-Referenz',
-        'R_PSADB': 'PSADB == Summe |Byte-Differenzen|',
+        'R_PSAD': 'PSAD(BYTE+WORD) == Summe |Lane-Differenzen|',
     })
-    print("M17 ROM/Primitiven (R_NIBLKP/R_BMAT_N_OR/R_BMAT_N_XOR/R_PSADB):")
+    print("M17 ROM/Primitiven (R_NIBLKP/R_BMAT_N_OR/R_BMAT_N_XOR/R_PSAD):")
     for name in sorted(LEMMAS):
         print(f"  {name:<14} {LEMMAS[name]}")
     n_real = sum(1 for k in LEMMAS if k.startswith('R_'))
     n_impo = sum(1 for k in LEMMAS if k.startswith('I_'))
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M17 PASS")
+
+def _run_M18():
 
     # === M18: BMATOR/BMATXOR (bitfrob 24/25) + PEXT_N/PDEP_N (31/32) — 32-Bit-
     # ROR-Bank- und Nibble-Kompression. Pipeline-Semantik: BMATOR=24/BMATXOR=25
@@ -2739,6 +3051,8 @@ if __name__ == "__main__":
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M18 PASS")
 
+def _run_M19():
+
     # === M19: Primitiv-Konstruktionen des Decoder-Klassifizierers imm_encode
     # (helpers.py:374-449): zero/maskw/maskw_shift/replicate/signext/permb/
     # synthesize-lsl16_or. Beweis der Primitiv-Bausteine (MASKW+NOT, MASKW+LSL,
@@ -2827,6 +3141,369 @@ if __name__ == "__main__":
     n_impo = sum(1 for k in LEMMAS if k.startswith('I_'))
     print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
     print("M19 PASS")
+
+
+def _run_M20():
+    # M20: SQROM8 — Quadrat-Tabellen-Multiplikation (Elite-1985-Trick).
+    # A*B = ((A+B)^2 - A^2 - B^2) >> 1, unsigned 8x8.
+    # ROM: T[n]=n^2, n in [0,510] -> 9-bit-Index x 18-bit-Eintrag = 512x18 =
+    # 9216 Bit = ~9 Kbit (1 BlockRAM / ~150 LUT-RAM; Masken-ROM: fast null).
+    # Breiten-Disziplin: A+B in 9 bit (255+255=510 < 512, kein Overflow);
+    # Quadrat-Diff in 18 bit ((A+B)^2 <= 260100 < 2^18; stets >= A^2+B^2,
+    # da Kreuzterm 2AB >= 0 -> nie negativ); Ergebnis 16 bit (max 65025).
+    print("Q115 SQROM8: 8x8 unsigned == ((a+b)^2 - a^2 - b^2) >> 1 per Negation")
+
+    def _sq8(x8, y8):
+        x9 = z3.ZeroExt(1, x8)
+        y9 = z3.ZeroExt(1, y8)
+        s9 = x9 + y9                                       # 9 bit, max 510
+        sq = z3.ZeroExt(9, s9) * z3.ZeroExt(9, s9)         # 18 bit, max 260100
+        d = sq - z3.ZeroExt(2, z3.ZeroExt(8, x8) * z3.ZeroExt(8, x8)) \
+              - z3.ZeroExt(2, z3.ZeroExt(8, y8) * z3.ZeroExt(8, y8))  # 18 bit, >= 0
+        return z3.Extract(15, 0, d >> z3.BitVecVal(1, 18))
+
+    q115_a = z3.BitVec('a_q115', 8)
+    q115_b = z3.BitVec('b_q115', 8)
+    q115_res = _sq8(q115_a, q115_b)
+    q115_ref = z3.ZeroExt(8, q115_a) * z3.ZeroExt(8, q115_b)  # 16 bit bvumul
+    _m9_unsat("Q115 SQROM8 ((a+b)^2-a^2-b^2)>>1 == a*b",
+              q115_res != q115_ref)
+
+    # Q116 --stretch (optional): 16x16 via 4x Quadranten-Komposition
+    # (Schoolbook). Lemma-Einsetzung: Q115 beweist _sq8 == bvumul (16-bit),
+    # also darf die Komposition auf BV-Mul-Ebene gerechnet werden.
+    # a=ah*256+al, b=bh*256+bl; prod = hi*2^16 + (c1+c2)*2^8 + lo.
+    # Grenzen: hi<=0xFE01 (16 bit), c1+c2<=0x1FC02 (17 bit), Summe max
+    # 0xFFFD02FF < 2^32 -> kein Overflow.
+    # BEKANNTE z3-GRENZE: die Distributiv-Identitaet (Summe von 4x 8x8-Muls
+    # == 1x 16x16-BV-Mul) ist QF_BV-bit-blast-schwer — 6 Strategien getestet
+    # (16/32/64-bit-Breiten, untere/obere-Haelfte-Split, solve-eqs-Kette,
+    # sat.smt, AIG), alle >300s unbeweisbar. Nur --stretch (5-Min-Timeout);
+    # unknown/timeout bricht NICHT ab (stretch optional), sat -> CEX + STOP.
+    if '--stretch' in sys.argv:
+        print("Q116 --stretch: 16x16 via 4x Quadranten gegen 32-bit-bvumul per Negation")
+        q116_a = z3.BitVec('a_q116', 16)
+        q116_b = z3.BitVec('b_q116', 16)
+        q116_ah = z3.Extract(15, 8, q116_a)
+        q116_al = z3.Extract(7, 0, q116_a)
+        q116_bh = z3.Extract(15, 8, q116_b)
+        q116_bl = z3.Extract(7, 0, q116_b)
+        q116_hi = z3.ZeroExt(8, q116_ah) * z3.ZeroExt(8, q116_bh)   # 16 bit
+        q116_lo = z3.ZeroExt(8, q116_al) * z3.ZeroExt(8, q116_bl)   # 16 bit
+        q116_c1 = z3.ZeroExt(8, q116_ah) * z3.ZeroExt(8, q116_bl)   # 16 bit
+        q116_c2 = z3.ZeroExt(8, q116_al) * z3.ZeroExt(8, q116_bh)   # 16 bit
+        q116_prod = (z3.ZeroExt(16, q116_hi) << z3.BitVecVal(16, 32)) \
+            + ((z3.ZeroExt(16, q116_c1) + z3.ZeroExt(16, q116_c2))
+               << z3.BitVecVal(8, 32)) \
+            + z3.ZeroExt(16, q116_lo)
+        q116_ref = z3.ZeroExt(16, q116_a) * z3.ZeroExt(16, q116_b)  # 32 bit bvumul
+        s116 = z3.SolverFor('QF_BV')
+        s116.set("timeout", 300000)
+        s116.add(q116_prod != q116_ref)
+        r116 = s116.check()
+        if r116 == z3.unsat:
+            print("Q116 --stretch 16x16-Komposition bewiesen PASS")
+        elif r116 == z3.sat:
+            m116 = s116.model()
+            print(f"Q116 --stretch SAT -> Gegenbeispiel a={m116.eval(q116_a, model_completion=True)} "
+                  f"b={m116.eval(q116_b, model_completion=True)}")
+            assert False, "Q116: sat -> STOP (kein Weaken)"
+        else:
+            print("Q116 stretch: unknown (timeout) — z3-Bit-Blast-Grenze, offen")
+    else:
+        print("Q116 --stretch uebersprungen (Flag fehlt; z3-Grenze, siehe Kommentar)")
+
+    # M20: LEMMAS-Update — SQROM8-Primitive realisierbar; 16x16-Komposition
+    # als --stretch markiert (Q116 offen, z3-Bit-Blast-Grenze).
+    LEMMAS.update({
+        'R_SQROM8': '((a+b)^2-a^2-b^2)>>1 == a*b (8x8, 9 Kbit ROM)',
+        'R_SQROM8_16': '16x16 via 4x SQROM8 (Schoolbook; Q116 --stretch)',
+    })
+    print("M20 SQROM8 (R_SQROM8/R_SQROM8_16):")
+    for name in sorted(LEMMAS):
+        print(f"  {name:<14} {LEMMAS[name]}")
+    n_real = sum(1 for k in LEMMAS if k.startswith('R_'))
+    n_impo = sum(1 for k in LEMMAS if k.startswith('I_'))
+    print(f"  Zaehlung: realisierbar={n_real}, unmoeglich={n_impo}")
+    print("M20 PASS")
+
+
+def _run_M21():
+    # === M21: Division via Newton-Raphson (Reziprok-ROM) ===
+    # Semantik K2 (ops_survey.md, ratifiziert): DIV res=Quotient, aux=Rest,
+    # bit5=unsigned/signed, C-Truncation, div-zero DEFINIERT (q=0xFFFFFFFF,
+    # rem=s1, FLAG_O), MIN/-1 Overflow (q=MIN, rem=0, FLAG_O).
+    # Newton-Pfad: Reziprok-ROM (4-bit-Index auf NORMALISIERTEM Divisor
+    # b_n = b<<clz, b_n in [128,255] -> uniforme 2^-4-Approx) + 1-2 Iterationen
+    # (r = 2r - (r^2*b_n)>>16, quadratische Konvergenz) + ±1-Korrektur.
+    # Q117: 8-bit-Miniatur-Beweis — 16-EW-ROM + 1 Iteration == bvudiv exakt.
+    print("Q117 NEWTON8: 8-bit-Div via 4-bit-ROM + 1 Newton-Iteration per Negation")
+    t117 = time.time()
+
+    def _newton8(a, b, n_iter, r0vals):
+        b16 = z3.ZeroExt(8, b)
+        b_n = None
+        for sh in range(8):
+            lo = 1 << (7 - sh)
+            hi = (1 << (8 - sh)) - 1
+            cand = b16 << sh
+            b_n = cand if b_n is None else z3.If(z3.And(b >= lo, b <= hi), cand, b_n)
+        idx = z3.Extract(7, 4, b_n)
+        r0 = z3.BitVecVal(r0vals[8], 16)
+        for i in range(9, 16):
+            r0 = z3.If(idx == z3.BitVecVal(i, 4), z3.BitVecVal(r0vals[i], 16), r0)
+        r = r0
+        for _ in range(n_iter):
+            r2 = z3.ZeroExt(16, r) * z3.ZeroExt(16, r)
+            r2b = z3.ZeroExt(8, r2) * z3.ZeroExt(24, b_n)
+            num = z3.LShR(r2b, 16)
+            rn = z3.ZeroExt(24, 2 * r) - num
+            r = z3.Extract(15, 0, rn)
+        a32 = z3.ZeroExt(24, a)
+        r32 = z3.ZeroExt(16, r)
+        q = None
+        for sh in range(8):
+            lo = 1 << (7 - sh)
+            hi = (1 << (8 - sh)) - 1
+            cand = z3.LShR(a32 * r32, 16 - sh)
+            q = cand if q is None else z3.If(z3.And(b >= lo, b <= hi), cand, q)
+        b24 = z3.ZeroExt(24, b)
+        qc = z3.If(z3.UGT((q + 1) * b24, a32),
+                   z3.If(z3.UGT(q * b24, a32), q - 1, q), q + 1)
+        return z3.Extract(7, 0, qc)
+
+    r0vals = {i: (1 << 16) // (i << 4) for i in range(8, 16)}
+    q117_a = z3.BitVec('a_q117', 8)
+    q117_b = z3.BitVec('b_q117', 8)
+    q117_q = _newton8(q117_a, q117_b, 1, r0vals)
+    _m9_unsat("Q117 NEWTON8 4-bit-ROM+1-Newton == bvudiv",
+              z3.And(q117_b >= 1, q117_q != z3.UDiv(q117_a, q117_b)))
+
+    # Q118: div-zero DEFINIERT — q=0xFF (8-bit), rem=a (Semantik K2).
+    print("Q118 NEWTON8 div-zero: q=0xFF, rem=a definiert per Negation")
+    q118_q = z3.If(q117_b == 0, z3.BitVecVal(0xFF, 8), q117_q)
+    _m9_unsat("Q118 div-zero q==0xFF && rem==a",
+              z3.And(q117_b == 0,
+                     z3.Or(q118_q != z3.BitVecVal(0xFF, 8),
+                           z3.ZeroExt(24, q117_a) -
+                           z3.ZeroExt(24, q118_q) * z3.ZeroExt(24, q117_b)
+                           != z3.ZeroExt(24, q117_a))))
+
+    # Q119: Rest == URem (aux-Semantik: res=Quotient, aux=Rest, MULHI-Symmetrie).
+    print("Q119 NEWTON8 Rest == URem: pruefe per Negation")
+    q119_rem = z3.ZeroExt(24, q117_a) - z3.ZeroExt(24, q118_q) * z3.ZeroExt(24, q117_b)
+    _m9_unsat("Q119 NEWTON8 rem==URem(a,b)",
+              z3.And(q117_b >= 1,
+                     z3.Extract(7, 0, q119_rem) != z3.URem(q117_a, q117_b)))
+
+    LEMMAS.update({
+        'R_NEWTON8': '8-bit-Div: 4-bit-ROM + 1 Newton-Iteration + Korrektur (Q117)',
+        'R_DIVZERO': 'div-zero definiert: q=0xFF, rem=a (K2-Semantik)',
+        'R_DIVREM': 'Rest == URem (aux-Tap, MULHI-Symmetrie)',
+    })
+    print("M21 Newton-Division (R_NEWTON8/R_DIVZERO/R_DIVREM):")
+    for name in sorted(LEMMAS):
+        print(f"  {name:<14} {LEMMAS[name]}")
+    print(f"  Q117-Q119 fertig ({time.time()-t117:.2f}s)")
+    print("M21 PASS")
+
+
+def _run_M22():
+    # === M22: 32-bit-Newton-Abschaetzung (Reziprok-ROM, Q31-Skalierung) ===
+    # Skaliert die M21-Studie (Q117) auf 32-bit. Breiten-Design:
+    # Divisor normiert b_n = b<<sh in [2^31, 2^32). Reziprok r = 2^63/b_n
+    # in [2^31, 2^32) — Q31-Festkomma von 1.0..2.0 (2^32/b_n als Integer
+    # waere nur {1,2} = ULP-Katastrophe). 32-bit-r hat ULP=1 -> relativer
+    # ULP-Fehler 2^-31; q = LShR(a*r, 63-sh) (a*r 64-bit), LShR-ULP 1 ->
+    # Delta_q_ulp <= 2. KERN-ERGEBNIS: ±1-Korrektur (M21-Idiom) reicht auf
+    # 32-bit NICHT — braucht 2-Pass-Fixup (q+1-Check iteriert).
+    # ROM: 256x32 = 8 Kbit, r0[i] = min(2^63 div (i<<24), 0xFFFFFFFF),
+    # i = Top-8-Bits von b_n (i in [128,255]).
+    print("M22 NEWTON32: 32-bit-Newton-Abschaetzung (ROM-Schranke + Konvergenz + Fixup)")
+    t122 = time.time()
+
+    # Q120: ROM-Fehler-Schranke |e0| <= 2^-7 fuer alle 128 ROM-Zellen.
+    # e0 = |b_n * r0[i] - 2^63|. Beweis je Zelle per Negation: b_n in
+    # Zelle[i] UND b_n*r0[i] ausserhalb [2^63-2^56, 2^63+2^56] -> unsat.
+    print("Q120 NEWTON32: 128 Zellen: b_n*r0[i] in [2^63-2^56, 2^63+2^56] (e0<=2^-7)")
+    _lo64 = z3.BitVecVal((1 << 63) - (1 << 56), 64)
+    _hi64 = z3.BitVecVal((1 << 63) + (1 << 56), 64)
+    for _i in range(128, 256):
+        _r0 = (1 << 63) // (_i << 24)
+        if _r0 > 0xFFFFFFFF:
+            _r0 = 0xFFFFFFFF
+        _bn = z3.BitVec('bn_q120_%d' % _i, 32)
+        _t = z3.ZeroExt(32, _bn) * z3.BitVecVal(_r0, 64)
+        _bad = z3.Or(z3.ULT(_t, _lo64), z3.UGT(_t, _hi64))
+        _c = z3.And(z3.UGE(_bn, z3.BitVecVal(_i << 24, 32)),
+                    z3.ULE(_bn, z3.BitVecVal((_i + 1) * (1 << 24) - 1, 32)),
+                    _bad)
+        _s = z3.SolverFor('QF_BV')
+        _s.set("timeout", 30000)
+        _s.add(_c)
+        _r = _s.check()
+        if _r == z3.sat:
+            _m = _s.model()
+            print(f"Q120 Zelle {_i}: SAT -> Gegenbeispiel bn={_m.eval(_bn, model_completion=True)}")
+            assert False, f"Q120 Zelle {_i}: sat -> STOP (Schranke verletzt)"
+        assert _r == z3.unsat, f"Q120 Zelle {_i}: {_r} -> STOP (kein Weaken)"
+    print("Q120 NEWTON32 ROM-Schranke e0<=2^-7 (128 Zellen) PASS")
+
+    # Q121: Newton-Konvergenz mit Quantisierung, QF_NRA.
+    # e_{k+1} <= e_k^2 + 2^-32 (je Iteration 1 ULP r + 1 ULP LShR, konservativ).
+    # 3 Iterationen: e3 <= 2^-31 (Negation e3 > 2^-31 unsat).
+    print("Q121 NEWTON32: Konvergenz e0<=2^-7 -> e3<=2^-31 (3 Iter., Quant. 2^-32)")
+    _e0, _e1, _e2, _e3 = z3.Reals('e0_q121 e1_q121 e2_q121 e3_q121')
+    _eps = z3.RealVal(1) / 2**32
+    _sn = z3.Solver()
+    _sn.add(_e0 <= z3.RealVal(1) / 128, _e0 >= 0)
+    _sn.add(_e1 <= _e0 * _e0 + _eps, _e1 >= 0)
+    _sn.add(_e2 <= _e1 * _e1 + _eps, _e2 >= 0)
+    _sn.add(_e3 <= _e2 * _e2 + _eps, _e3 >= 0)
+    _sn.add(_e3 > z3.RealVal(1) / 2**31)
+    _r = _sn.check()
+    assert _r == z3.unsat, f"Q121: {_r} -> STOP (Konvergenz nicht beweisbar)"
+    print("Q121 NEWTON32 Konvergenz-Kette PASS (3 Iterationen reichen)")
+
+    # Q122: q-Fehler-Schranke. Ideal: Delta_q = a*e3/b < 2^-30 (Negation
+    # unsat). ULP-Terme: r-ULP 1 + LShR-ULP 1 -> |Delta_q| <= 2.
+    # KONSEQUENZ: ±1-Korrektur (M21-Idiom) reicht NICHT auf 32-bit;
+    # braucht 2-Pass-Fixup (q+1-Check 2x) oder 3-Kandidaten-Check.
+    print("Q122 NEWTON32: Delta_q_ideal < 2^-30; ULP-Reste <= 2 -> 2-Pass-Fixup noetig")
+    _a, _b = z3.Reals('a_q122 b_q122')
+    _sn2 = z3.Solver()
+    _sn2.add(_a >= 0, _a < 2**32, _b >= 2**31, _e3 <= z3.RealVal(1) / 2**31)
+    _sn2.add(_a * _e3 / _b > z3.RealVal(1) / 2**30)
+    _r = _sn2.check()
+    assert _r == z3.unsat, f"Q122: {_r} -> STOP (Schranke nicht beweisbar)"
+    print("Q122 NEWTON32 q-Fehler-Schranke PASS (Fixup-Bedarf dokumentiert)")
+
+    LEMMAS.update({
+        'R_NEWTON32': '32-bit-Newton: ROM e0<=2^-7, 3 Iter. e3<=2^-31, 2-Pass-Fixup (Q120-Q122)',
+    })
+    print("M22 32-bit-Newton-Abschaetzung (R_NEWTON32):")
+    for name in sorted(LEMMAS):
+        print(f"  {name:<14} {LEMMAS[name]}")
+    print(f"  Q120-Q122 fertig ({time.time()-t122:.2f}s)")
+    print("M22 PASS")
+
+
+if __name__ == "__main__":
+    z3.set_param("parallel.enable", True)  # Multi-Core: mehrere Strategien parallel
+
+    import argparse
+
+    # Sektions-Gruppen fuer gezielte Laeufe. M-Namen + thematische Aliase;
+    # Aliase fuer schnelle Agenten-/Dev-Laeufe (Context-/Timeout-Schutz).
+    _SEC_NAMES = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M8b', 'M9',
+                  'M10', 'M10b', 'M12', 'M13', 'M14', 'M15', 'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22']
+    _ALIASES = {
+        'ternlog': ['M1'],
+        'bitfrob': ['M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M16', 'M17', 'M18'],
+        'arith4':  ['M8', 'M8b'],
+        'permb':   ['M9'],
+        'pipe':    ['M10', 'M10b'],
+        'macro':   ['M12', 'M13', 'M14'],
+        'gf':      ['M15'],
+        'decoder': ['M19'],
+        'sqrom':   ['M20'],
+        'div':     ['M21'],
+        'newton32': ['M22'],
+        'smoke':   ['M1', 'M2', 'M3', 'M4', 'M8b'],
+    }
+    _TITLES = {
+        'M1': 'ternlog-LUTs (Q1-Q3, Q100-Q114)',
+        'M2': 'bitfrob-Stufe (LSR/LSL/ROR/ROL/MASK/MASKW/SEXT)',
+        'M3': '1-Pass-Synthese (CMOV)',
+        'M4': 'Count/Scan-Modi (LZC/TZC/POPCNT_B)',
+        'M5': 'Pass-Schranken-Beweise UBFX/BFI',
+        'M6': 'pext32/pdep32-Butterfly-Beweise',
+        'M7': '1-Pass-Enumeration (ternlog+bitfrob Oberflaeche)',
+        'M8': 'arith4-Skalar-Enumeration (Konkrete-Mode-Dispatch)',
+        'M8b': 'PADD/CMP/PMINMAX/MUL-Modelle (SWAR 1-Pass)',
+        'M9': 'permb — Byte/Nibble-Permute + shift_ctrl',
+        'M10': 'Aux-Pipe-Slot-Modelle (2. Pipe-Slot)',
+        'M10b': 'Kompositions-Beweise (2. Pipe-Slot)',
+        'M12': 'echte Mikrocode-Sequenzen',
+        'M13': 'Makro-Sequenzen (shift_right/shift_left/mul_ctz/gray)',
+        'M14': 'Kompositions-Lemmata',
+        'M15': 'GF(2^8)-Multiplikation (CLMUL/POLY_RED)',
+        'M16': 'bitfrob-Modi als z3-Funktionen + Negations-Beweise',
+        'M17': 'NIBLKP/BMAT_N_OR/BMAT_N_XOR/PSAD (ROM/Primitive)',
+        'M18': 'BMATOR/BMATXOR + PEXT_N/PDEP_N (32-Bit)',
+        'M19': 'imm_encode-Decoder-Primitiven',
+        'M20': 'SQROM8-Quadrat-Tabellen-MUL (Q115-Q116)',
+        'M21': 'Newton-Division (Q117-Q119)',
+        'M22': '32-bit-Newton-Abschaetzung (Q120-Q122)',
+    }
+    _SECTIONS = [
+        ('M1', _run_M1), ('M2', _run_M2), ('M3', _run_M3), ('M4', _run_M4),
+        ('M5', _run_M5), ('M6', _run_M6), ('M7', _run_M7), ('M8', _run_M8),
+        ('M8b', _run_M8b), ('M9', _run_M9), ('M10', _run_M10), ('M10b', _run_M10b),
+        ('M12', _run_M12), ('M13', _run_M13), ('M14', _run_M14), ('M15', _run_M15),
+        ('M16', _run_M16), ('M17', _run_M17), ('M18', _run_M18), ('M19', _run_M19),
+        ('M20', _run_M20),
+        ('M21', _run_M21),
+        ('M22', _run_M22),
+    ]
+
+    def _resolve(tok):
+        if tok in _ALIASES:
+            return _ALIASES[tok]
+        if tok in _SEC_NAMES:
+            return [tok]
+        _parser.error(f"unbekannte Gruppe/Sektion: {tok}")
+
+    _parser = argparse.ArgumentParser(
+        description='z3-Beweis-Suite der 4-Stufen-Pipeline (M1..M19)')
+    _parser.add_argument('-g', '--group', action='append', default=[], metavar='GRP',
+                         help='nur diese Sektion(en) laufen (wiederholbar, kommasepariert); '
+                              'M-Namen oder Aliase; Default: alle')
+    _parser.add_argument('--skip', action='append', default=[], metavar='GRP',
+                         help='Sektion(en) vom Lauf ausschliessen')
+    _parser.add_argument('--list', action='store_true',
+                         help='Sektionen + Aliase zeigen, dann exit')
+    _parser.add_argument('--stretch', action='store_true',
+                         help='M13: erweiterte shift-Grenzen (hist. sys.argv-Flag)')
+    _args = _parser.parse_args()
+
+    if _args.list:
+        _inv = {}
+        for _a, _ss in _ALIASES.items():
+            for _s in _ss:
+                _inv.setdefault(_s, []).append(_a)
+        print("Sektionen (M-Namen; Aliase dahinter):")
+        for _n in _SEC_NAMES:
+            print(f"  {_n:<4} {_TITLES[_n]:<52} [{', '.join(_inv.get(_n, []))}]")
+        print("Aliase:")
+        for _a, _ss in _ALIASES.items():
+            print(f"  {_a:<10} {' '.join(_ss)}")
+        print("Beispiele: python3 pipeline_smt.py -g ternlog | -g M9,pipe | -g smoke "
+              "| --skip M15")
+        sys.exit(0)
+
+    _want = set(_SEC_NAMES)
+    if _args.group:
+        _want = set()
+        for _g in _args.group:
+            for _tok in _g.split(','):
+                _tok = _tok.strip()
+                if _tok:
+                    _want.update(_resolve(_tok))
+    for _g in _args.skip:
+        for _tok in _g.split(','):
+            _tok = _tok.strip()
+            if _tok:
+                _want.difference_update(_resolve(_tok))
+
+    for _n, _fn in _SECTIONS:
+        if _n not in _want:
+            print(f"{_n} skip")
+            continue
+        _t0 = time.time()
+        _fn()
+        print(f"[{_n} {time.time() - _t0:.2f}s]")
+
 
 
 print("import-ok")

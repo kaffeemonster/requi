@@ -81,8 +81,8 @@ def test_04_arith4_more():
     print("slt 5,-1:   ", hex(arith4(5, 0xFFFFFFFF, 1, ArithMode.SLT, 0)['res']))     # erwartet 0x00000000
     print("slt 5,5:    ", hex(arith4(5, 5, 1, ArithMode.SLT, 0)['res']))              # erwartet 0x00000000
     print("sle 5,5:    ", hex(arith4(5, 5, 0, ArithMode.SLT, 0)['res']))              # erwartet 0xFFFFFFFF (s3=0 -> <=)
-    print("sltu -1,5:  ", hex(arith4(0xFFFFFFFF, 5, 1, ArithMode.SLTU, 0)['res']))     # erwartet 0x00000000 (unsigned)
-    print("sltu 1,2:   ", hex(arith4(1, 2, 1, ArithMode.SLTU, 0)['res']))              # erwartet 0xFFFFFFFF
+    print("sltu -1,5:  ", hex(arith4(0xFFFFFFFF, 5, 1, ArithMode.SLT, 0, unsigned=True)['res']))     # erwartet 0x00000000 (unsigned)
+    print("sltu 1,2:   ", hex(arith4(1, 2, 1, ArithMode.SLT, 0, unsigned=True)['res']))              # erwartet 0xFFFFFFFF
     print("mfc c:      ", hex(arith4(0, 0, 0, ArithMode.MFC, FLAG_C)['res']))         # erwartet 1
     print("mfc 0:      ", hex(arith4(0, 0, 0, ArithMode.MFC, 0)['res']))              # erwartet 0
     print("lea <<1:    ", hex(arith4(0x1000, 0x1234, 0, ArithMode.ADDSHIFT1, 0)['res']))     # erwartet 0x00003468
@@ -91,23 +91,23 @@ def test_04_arith4_more():
 def test_07_packed_minmax_sat():
     # TEST 7: Packed Min/Max + Packed Saturating Add/Sub (Carry-Chain-Taps)
     print("=== packed min/max + saturating ===")
-    print("pminb:      ", hex(arith4(0x01020304, 0x04030201, 0, ArithMode.PMIN, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x01020201
-    print("pmaxb:      ", hex(arith4(0x01020304, 0x04030201, 0, ArithMode.PMAX, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x04030304
-    print("pminb s:    ", hex(arith4(0x0080FF7F, 0x0100FF80, 1, ArithMode.PMIN, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x0080FF80
-    print("pmaxb s:    ", hex(arith4(0x0080FF7F, 0x0100FF80, 1, ArithMode.PMAX, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x0100FF7F
-    print("pminw:      ", hex(arith4(0x0000FFFF, 0xFFFF0000, 0, ArithMode.PMIN, 0, op_type_1=OpType.WORD)['res']))  # erwartet 0x00000000
-    print("pmaxw:      ", hex(arith4(0x0000FFFF, 0xFFFF0000, 0, ArithMode.PMAX, 0, op_type_1=OpType.WORD)['res']))  # erwartet 0xFFFFFFFF
-    print("pminw s:    ", hex(arith4(0x80000001, 0x00018000, 1, ArithMode.PMIN, 0, op_type_1=OpType.WORD)['res']))  # erwartet 0x80008000
-    print("pmaxw s:    ", hex(arith4(0x80000001, 0x00018000, 1, ArithMode.PMAX, 0, op_type_1=OpType.WORD)['res']))  # erwartet 0x00010001
-    print("psaddb:     ", hex(arith4(0xFF010202, 0x01010101, 0, ArithMode.PSADD, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0xFF020303
-    print("psaddb s:   ", hex(arith4(0x64646464, 0x64646464, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x7F7F7F7F (100+100->clamp)
-    print("psaddb s-:  ", hex(arith4(0x9C9C9C9C, 0x9C9C9C9C, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x80808080 (-100+-100->clamp)
-    print("psaddb 7f+1:", hex(arith4(0x7F, 0x01, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE)['res']))            # erwartet 0x7F (127+1->clamp, nicht 0x80!)
-    print("psaddw:     ", hex(arith4(0x0000FFFF, 0x00000001, 0, ArithMode.PSADD, 0, op_type_1=OpType.WORD)['res'])) # erwartet 0x0000FFFF
-    print("pssubb:     ", hex(arith4(0x050A0A05, 0x0A05050A, 0, ArithMode.PSSUB, 0, op_type_1=OpType.BYTE)['res'])) # erwartet 0x00050500
-    print("pssubb s:   ", hex(arith4(0x80, 0x7F, 1, ArithMode.PSSUB, 0, op_type_1=OpType.BYTE)['res']))             # erwartet 0x80 (-128-127->clamp)
-    print("pssubb s+:  ", hex(arith4(0x7F, 0x80, 1, ArithMode.PSSUB, 0, op_type_1=OpType.BYTE)['res']))             # erwartet 0x7F (127-(-128)->clamp)
-    print("pssubw:     ", hex(arith4(0x00000005, 0x0000000A, 0, ArithMode.PSSUB, 0, op_type_1=OpType.WORD)['res'])) # erwartet 0x00000000
+    print("pminb:      ", hex(arith4(0x01020304, 0x04030201, 0, ArithMode.PMIN, 0, op_type_1=OpType.BYTE, unsigned=True)['res']))  # erwartet 0x01020201
+    print("pmaxb:      ", hex(arith4(0x01020304, 0x04030201, 0, ArithMode.PMAX, 0, op_type_1=OpType.BYTE, unsigned=True)['res']))  # erwartet 0x04030304
+    print("pminb s:    ", hex(arith4(0x0080FF7F, 0x0100FF80, 1, ArithMode.PMIN, 0, op_type_1=OpType.BYTE, unsigned=False)['res']))  # erwartet 0x0080FF80
+    print("pmaxb s:    ", hex(arith4(0x0080FF7F, 0x0100FF80, 1, ArithMode.PMAX, 0, op_type_1=OpType.BYTE, unsigned=False)['res']))  # erwartet 0x0100FF7F
+    print("pminw:      ", hex(arith4(0x0000FFFF, 0xFFFF0000, 0, ArithMode.PMIN, 0, op_type_1=OpType.WORD, unsigned=True)['res']))  # erwartet 0x00000000
+    print("pmaxw:      ", hex(arith4(0x0000FFFF, 0xFFFF0000, 0, ArithMode.PMAX, 0, op_type_1=OpType.WORD, unsigned=True)['res']))  # erwartet 0xFFFFFFFF
+    print("pminw s:    ", hex(arith4(0x80000001, 0x00018000, 1, ArithMode.PMIN, 0, op_type_1=OpType.WORD, unsigned=False)['res']))  # erwartet 0x80008000
+    print("pmaxw s:    ", hex(arith4(0x80000001, 0x00018000, 1, ArithMode.PMAX, 0, op_type_1=OpType.WORD, unsigned=False)['res']))  # erwartet 0x00010001
+    print("psaddb:     ", hex(arith4(0xFF010202, 0x01010101, 0, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=True)['res']))  # erwartet 0xFF020303
+    print("psaddb s:   ", hex(arith4(0x64646464, 0x64646464, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=False)['res']))  # erwartet 0x7F7F7F7F (100+100->clamp)
+    print("psaddb s-:  ", hex(arith4(0x9C9C9C9C, 0x9C9C9C9C, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=False)['res']))  # erwartet 0x80808080 (-100+-100->clamp)
+    print("psaddb 7f+1:", hex(arith4(0x7F, 0x01, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=False)['res']))            # erwartet 0x7F (127+1->clamp, nicht 0x80!)
+    print("psaddw:     ", hex(arith4(0x0000FFFF, 0x00000001, 0, ArithMode.PSADD, 0, op_type_1=OpType.WORD, unsigned=True)['res'])) # erwartet 0x0000FFFF
+    print("pssubb:     ", hex(arith4(0x050A0A05, 0x0A05050A, 0, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=True, inv_2=True)['res'])) # erwartet 0x00050500
+    print("pssubb s:   ", hex(arith4(0x80, 0x7F, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=False, inv_2=True)['res']))             # erwartet 0x80 (-128-127->clamp)
+    print("pssubb s+:  ", hex(arith4(0x7F, 0x80, 1, ArithMode.PSADD, 0, op_type_1=OpType.BYTE, unsigned=False, inv_2=True)['res']))             # erwartet 0x7F (127-(-128)->clamp)
+    print("pssubw:     ", hex(arith4(0x00000005, 0x0000000A, 0, ArithMode.PSADD, 0, op_type_1=OpType.WORD, unsigned=True, inv_2=True)['res'])) # erwartet 0x00000000
     
 def test_08_optype_negate():
     # TEST 8: op_type (Operanden-Typ) — per-Lane-Negation fuer Packed-Daten
@@ -128,14 +128,14 @@ def test_08_optype_negate():
 def test_09_packed_scalar():
     # TEST 9: op_type_1=SCALAR -> 32-Bit-Lane-Fallback (skalare Ops aus der Packed-Familie)
     print("=== packed family, SCALAR lanes ===")
-    print("pmin s scalar: ", hex(arith4(0xFFFFFFF0, 5, 1, ArithMode.PMIN, 0, op_type_1=OpType.SCALAR)['res']))  # erwartet 0xFFFFFFF0 (signed min, 1 Schritt statt 2)
-    print("pmax s scalar: ", hex(arith4(0xFFFFFFF0, 5, 1, ArithMode.PMAX, 0, op_type_1=OpType.SCALAR)['res']))  # erwartet 5
-    print("pmin u scalar: ", hex(arith4(0xFFFFFFF0, 5, 0, ArithMode.PMIN, 0, op_type_1=OpType.SCALAR)['res']))  # erwartet 5 (unsigned)
+    print("pmin s scalar: ", hex(arith4(0xFFFFFFF0, 5, 1, ArithMode.PMIN, 0, op_type_1=OpType.SCALAR, unsigned=False)['res']))  # erwartet 0xFFFFFFF0 (signed min, 1 Schritt statt 2)
+    print("pmax s scalar: ", hex(arith4(0xFFFFFFF0, 5, 1, ArithMode.PMAX, 0, op_type_1=OpType.SCALAR, unsigned=False)['res']))  # erwartet 5
+    print("pmin u scalar: ", hex(arith4(0xFFFFFFF0, 5, 0, ArithMode.PMIN, 0, op_type_1=OpType.SCALAR, unsigned=True)['res']))  # erwartet 5 (unsigned)
     print("padd scalar:   ", hex(arith4(0x1000, 0x1234, 0, ArithMode.PADD, 0, op_type_1=OpType.SCALAR)['res']))   # erwartet 0x2234 (normales Add)
     print("cmp scalar eq: ", hex(arith4(0xDEADBEEF, 0xDEADBEEF, 0, ArithMode.CMP, 0, op_type_1=OpType.SCALAR)['res']))  # erwartet 0xFFFFFFFF
     print("cmp scalar ne: ", hex(arith4(0xDEADBEEF, 0xDEADBE00, 0, ArithMode.CMP, 0, op_type_1=OpType.SCALAR)['res']))  # erwartet 0x00000000
-    print("pssub s scalar:", hex(arith4(0x7FFFFFFF, 0x80000000, 1, ArithMode.PSSUB, 0, op_type_1=OpType.SCALAR)['res']))  # erwartet 0x7FFFFFFF (sat. skalares Sub)
-    print("psadd s scalar:", hex(arith4(0x7FFFFFFF, 1, 1, ArithMode.PSADD, 0, op_type_1=OpType.SCALAR)['res']))   # erwartet 0x7FFFFFFF (= SATADD)
+    print("pssub s scalar:", hex(arith4(0x7FFFFFFF, 0x80000000, 1, ArithMode.PSADD, 0, op_type_1=OpType.SCALAR, unsigned=False, inv_2=True)['res']))  # erwartet 0x7FFFFFFF (sat. skalares Sub)
+    print("psadd s scalar:", hex(arith4(0x7FFFFFFF, 1, 1, ArithMode.PSADD, 0, op_type_1=OpType.SCALAR, unsigned=False)['res']))   # erwartet 0x7FFFFFFF (= SATADD)
     
 def test_11_ternlog_luts():
     # TEST 11: Kategorie C — benannte ternlog-LUTs, MASKW (Mask aus Breite), SBFX via SEXT
@@ -344,8 +344,8 @@ def test_24_gfni_affine():
     print("TEST 24 PASS")
     
 def test_27_usatadd_subb():
-    # TEST 27: USATADD (unsigned saturating add) + SUBB (subtract-with-borrow)
-    print("\n=== TEST 27: USATADD + SUBB (borrow chain) ===")
+    # TEST 27: USATADD (unsigned saturating add) + ADDC+inv_2 (subtract-with-borrow, SUBB-Integration)
+    print("\n=== TEST 27: USATADD + ADDC+inv_2 (borrow chain) ===")
     
     # USATADD: clamp to 0xFFFFFFFF on unsigned overflow
     tests = {
@@ -357,46 +357,46 @@ def test_27_usatadd_subb():
         (0x7FFFFFFF, 0x7FFFFFFF, 0, 0): 0xFFFFFFFE,       # no clamp
     }
     for (a, b, c, fl), exp in tests.items():
-        r = arith4(a, b, c, ArithMode.USATADD, fl)['res']
+        r = arith4(a, b, c, ArithMode.SATADD, fl, unsigned=True)['res']
         assert r == exp, f"USATADD({hex(a)},{hex(b)}): {hex(r)} != {hex(exp)}"
         print(f"  usatadd({hex(a)},{hex(b)}) = {hex(r)}")
     
     # SUBB basic
-    r = arith4(10, 3, 0, ArithMode.SUBB, FLAG_C)          # C=1: 10-3=7
+    r = arith4(10, 3, 0, ArithMode.ADDC, FLAG_C, inv_2=True)          # C=1: 10-3=7
     assert r['res'] == 7, f"SUBB basic: {r['res']}"
     print(f"  subb(10,3,C=1) = {r['res']}")
     
-    r = arith4(10, 3, 0, ArithMode.SUBB, 0)               # C=0: 10-3-1=6
+    r = arith4(10, 3, 0, ArithMode.ADDC, 0, inv_2=True)               # C=0: 10-3-1=6
     assert r['res'] == 6, f"SUBB borrow: {r['res']}"
     print(f"  subb(10,3,C=0) = {r['res']}")
     
-    r = arith4(5, 10, 0, ArithMode.SUBB, FLAG_C)          # C=1: 5-10=-5 = 0xFFFFFFFB
+    r = arith4(5, 10, 0, ArithMode.ADDC, FLAG_C, inv_2=True)          # C=1: 5-10=-5 = 0xFFFFFFFB
     assert r['res'] == 0xFFFFFFFB, f"SUBB neg: {hex(r['res'])}"
     print(f"  subb(5,10,C=1) = {hex(r['res'])}")
     
-    r = arith4(5, 10, 0, ArithMode.SUBB, 0)               # C=0: 5-10-1=-6 = 0xFFFFFFFA
+    r = arith4(5, 10, 0, ArithMode.ADDC, 0, inv_2=True)               # C=0: 5-10-1=-6 = 0xFFFFFFFA
     assert r['res'] == 0xFFFFFFFA, f"SUBB neg borrow: {hex(r['res'])}"
     print(f"  subb(5,10,C=0) = {hex(r['res'])}")
     
     # SUBB C-flag
-    r = arith4(10, 3, 0, ArithMode.SUBB, 0, write_flags=True)
+    r = arith4(10, 3, 0, ArithMode.ADDC, 0, write_flags=True, inv_2=True)
     assert (r['flags'] & FLAG_C) != 0, "SUBB 10-3: C=1"
     print(f"  subb(10,3) flags C={'1' if r['flags']&FLAG_C else '0'}")
     
-    r = arith4(3, 10, 0, ArithMode.SUBB, 0, write_flags=True)
+    r = arith4(3, 10, 0, ArithMode.ADDC, 0, write_flags=True, inv_2=True)
     assert (r['flags'] & FLAG_C) == 0, "SUBB 3-10: C=0"
     print(f"  subb(3,10) flags C={'1' if r['flags']&FLAG_C else '0'}")
     
-    r = arith4(0, 0, 0, ArithMode.SUBB, FLAG_C, write_flags=True)  # C=1, no borrow-in
+    r = arith4(0, 0, 0, ArithMode.ADDC, FLAG_C, write_flags=True, inv_2=True)  # C=1, no borrow-in
     assert (r['flags'] & FLAG_C) != 0, "SUBB 0-0 C=1: 0-0-0=0, no borrow -> C=1"
     print(f"  subb(0,0,C=1) flags C={'1' if r['flags']&FLAG_C else '0'}")
     
-    r = arith4(0, 0, 0, ArithMode.SUBB, 0, write_flags=True)        # C=0, borrow-in
+    r = arith4(0, 0, 0, ArithMode.ADDC, 0, write_flags=True, inv_2=True)        # C=0, borrow-in
     # 0-0-1=-1 wraps, borrow occurred
     assert (r['flags'] & FLAG_C) == 0, "SUBB 0-0 C=0: 0-0-1=-1 borrow -> C=0"
     print(f"  subb(0,0,C=0) flags C={'1' if r['flags']&FLAG_C else '0'}")
     
-    r = arith4(0, 1, 0, ArithMode.SUBB, 0, write_flags=True)
+    r = arith4(0, 1, 0, ArithMode.ADDC, 0, write_flags=True, inv_2=True)
     assert (r['flags'] & FLAG_C) == 0, "SUBB 0-1: C=0"
     print(f"  subb(0,1) flags C={'1' if r['flags']&FLAG_C else '0'}")
     
@@ -915,19 +915,19 @@ def test_34_padd64_mul32acc():
     # --- MUL32ACC unsigned (bit5=1) ---
     print("\n--- MUL32ACC unsigned ---")
     
-    r = arith4(0xFFFFFFFF, 0x00000002, 0, MUL32ACC_U, 0, aux_in=0)
+    r = arith4(0xFFFFFFFF, 0x00000002, 0, ArithMode.MUL32ACC, 0, aux_in=0, unsigned=True)
     # unsigned: 0xFFFFFFFF*2 = 0x1FFFFFFFE → lo=0xFFFFFFFE, hi=0x1
     print("MUL32ACC u 0xFFFFFFFF*2: lo=0x%08X hi=0x%08X" % (r['res'], r['aux']))
     assert r['res'] == 0xFFFFFFFE
     assert r['aux'] == 0x1
     
-    r = arith4(0xFFFFFFFF, 0xFFFFFFFF, 0, MUL32ACC_U, 0, aux_in=0)
+    r = arith4(0xFFFFFFFF, 0xFFFFFFFF, 0, ArithMode.MUL32ACC, 0, aux_in=0, unsigned=True)
     print("MUL32ACC u 0xFFFFFFFF^2: lo=0x%08X hi=0x%08X (expect lo=1 hi=0xFFFFFFFE)" % (r['res'], r['aux']))
     assert r['res'] == 1
     assert r['aux'] == 0xFFFFFFFE
     
     # MUL32ACC unsigned with s3 accumulator
-    r = arith4(0xFFFFFFFF, 0x2, 5, MUL32ACC_U, 0, aux_in=0)
+    r = arith4(0xFFFFFFFF, 0x2, 5, ArithMode.MUL32ACC, 0, aux_in=0, unsigned=True)
     # prod = 0x1FFFFFFFE, lo=0xFFFFFFFE+5=3 carry=1, hi=1+0+1=2
     print("MUL32ACC u 0xFFFFFFFF*2+5: lo=0x%08X hi=0x%08X (expect lo=3 hi=2)" % (r['res'], r['aux']))
     assert r['res'] == 0x3
@@ -1005,7 +1005,7 @@ def test_36_perm_nibble():
         'bitfrob': {'mode_imm6': BitFrobMode.LSR, 'inv_1': False, 'inv_2': False, 'inv_3': False,
                     'prev_in_strobe': 8, 'src3_idx': 0, 'cst_table': False,
                     'write_flags': False, 'read_flags': False, 'internal_table': False},
-        'ternlog': {'tern_lut': 0xA0, 'prev_in_strobe': 1, 'src3_idx': 0,
+        'ternlog': {'tern_lut': TernLut.AND_C, 'prev_in_strobe': 1, 'src3_idx': 0,  # a & c: mask=0x0000FFFF via c
                     'cst_table': False, 'write_flags': False, 'read_flags': False,
                     'internal_table': False},
         'arith4':  {'mode_imm6': ArithMode.ADD, 'inv_1': False, 'inv_2': False, 'inv_3': False,
@@ -1187,14 +1187,17 @@ def test_06_minmax_pseudo():
 
 
 def test_10_pwadd_psadb_popcnt():
-    # TEST 10: PWADD (Pairwise Widen-Add) + PSADB (PSumAbs Bytes) + voller Popcount via Mikrocode
-    print("=== PWADD / PSADB ===")
+    # TEST 10: PWADD (Pairwise Widen-Add) + PSAD (PSumAbs, Lane via op_type_1) + voller Popcount via Mikrocode
+    print("=== PWADD / PSAD ===")
     print("pwadd b:      ", hex(arith4(0x01020304, 0, 0, ArithMode.PWADD, 0, op_type_1=OpType.BYTE)['res']))  # erwartet 0x00030007 (1+2, 3+4)
     print("pwadd w:      ", hex(arith4(0x00010002, 0, 0, ArithMode.PWADD, 0, op_type_1=OpType.WORD)['res']))  # erwartet 0x00000003 (1+2)
     print("pwadd scal:   ", hex(arith4(0x1000, 0x1234, 0, ArithMode.PWADD, 0)['res']))                        # erwartet 0x2234 (SCALAR -> s1+s2)
-    print("psadb:        ", hex(arith4(0x0F0F0F0F, 0x00000000, 0, ArithMode.PSADB, 0)['res']))                # erwartet 0x3C (4x15)
-    print("psadb 2:      ", hex(arith4(0x01020304, 0x04030201, 0, ArithMode.PSADB, 0)['res']))                # erwartet 0x8 (3+1+1+3)
-    print("psadb acc:    ", hex(arith4(0x0F0F0F0F, 0x00000000, 0x100, ArithMode.PSADB, 0)['res']))           # erwartet 0x13C (0x100 + 4x15)
+    print("psadb:        ", hex(arith4(0x0F0F0F0F, 0x00000000, 0, ArithMode.PSAD, 0, op_type_1=OpType.BYTE)['res']))                # erwartet 0x3C (4x15)
+    print("psadb 2:      ", hex(arith4(0x01020304, 0x04030201, 0, ArithMode.PSAD, 0, op_type_1=OpType.BYTE)['res']))                # erwartet 0x8 (3+1+1+3)
+    print("psadb acc:    ", hex(arith4(0x0F0F0F0F, 0x00000000, 0x100, ArithMode.PSAD, 0, op_type_1=OpType.BYTE)['res']))           # erwartet 0x13C (0x100 + 4x15)
+    print("psadw:        ", hex(arith4(0x03E801F4, 0x00000000, 0, ArithMode.PSAD, 0, op_type_1=OpType.WORD)['res']))               # erwartet 0x5DC (0x3E8+0x1F4)
+    print("psadw 2:      ", hex(arith4(0xFFFF0000, 0x0000FFFF, 0x1000, ArithMode.PSAD, 0, op_type_1=OpType.WORD)['res']))          # erwartet 0x20FFE (0x1000 + 2x0xFFFF)
+    print("psad scalar:  ", hex(arith4(0x00003E80, 0x00000050, 0, ArithMode.PSAD, 0)['res']))                                     # erwartet 0x3E30 (0x3E80-0x50)
     
     # Voller 32-Bit-Popcount: popcntb (bitfrob) + PWADD b + PWADD w = 3 Schritte, kein neuer HW-Block.
     # Bypass-Dicts: prev_in_strobe=8 = Vorstufen-Ergebnis durchreichen (nur Decoder-intern, nicht ISA-sichtbar).
@@ -1248,8 +1251,8 @@ def test_13_aux_line():
     ctrl_aux_combine = {
             'permb':  { 'src3_idx': 0, 'cst_table': False, 'imm6': 0, 'mode_nibble': False, 'blank_enable': False, 'prev_in_strobe': 8, 'write_flags': False, 'read_flags': False, 'internal_table': False}, # Bypass
             'bitfrob':{ 'mode_imm6': BitFrobMode.ROL, 'inv_1': False, 'inv_2': False, 'inv_3': False, 'prev_in_strobe': 0, 'src3_idx': 0, 'cst_table': False, 'write_flags': False, 'read_flags': False, 'internal_table': False}, # ROL fein, amt=s3=in_c
-            'ternlog':{ 'tern_lut': 0x96, 'prev_in_strobe': 1, 'src3_idx': 0, 'cst_table': False, 'write_flags': False, 'read_flags': False, 'internal_table': False,
-                        'aux_strobe': 2}, # a=prev_in(rotated), b=aux(original), c=in_c; 0x96 = a^b^c (3-input XOR)
+            'ternlog':{ 'tern_lut': TernLut.XOR3, 'prev_in_strobe': 1, 'src3_idx': 0, 'cst_table': False, 'write_flags': False, 'read_flags': False, 'internal_table': False,
+                        'aux_strobe': 2}, # a=prev_in(rotated), b=aux(original), c=in_c; 3-input XOR (TernLut.XOR3)
             'arith4': { 'mode_imm6': ArithMode.ADD, 'inv_1': False, 'inv_2': False, 'inv_3': False, 'prev_in_strobe': 8, 'src3_idx': 0, 'cst_table': False, 'write_flags': False, 'read_flags': False, 'internal_table': False}, # Bypass
     }
     # in_a=0x12345678 (ROL-Source), in_b=0 (unused), in_c=0xAAAAAAAA (ternlog c-Operand + ROL-amt=0xAA&7=2)
@@ -1507,7 +1510,7 @@ def test_20_mask_mode():
     assert out['res'] == 0, f"FAIL mask_mode w32"
     
     # mask_mode(width=8) SELECT_A(0xE4): a wenn mask sonst b(=0) -> untere 8 Bit extrahieren (UBFX lsb=0, w=8)
-    ti['tern_lut'] = 0xE4  # SELECT_A: a if c else b (mit b=0: a & c)
+    ti['tern_lut'] = TernLut.SELECT_A  # SELECT_A: a if c else b (mit b=0: a & c)
     ti['src3_idx'] = 8
     ci['ternlog'] = ti
     out = execute_pipeline(0, 0, 0, ci, 0xDEADBEEF, 0)
@@ -1515,7 +1518,7 @@ def test_20_mask_mode():
     assert out['res'] == 0xEF, f"FAIL mask_mode AND w8"
     
     # mask_mode(width=16) SELECT_A(0xE4): a wenn mask sonst b(=0) -> untere 16 Bit
-    ti['tern_lut'] = 0xE4  # SELECT_A
+    ti['tern_lut'] = TernLut.SELECT_A  # SELECT_A
     ti['src3_idx'] = 16
     ci['ternlog'] = ti
     out = execute_pipeline(0, 0, 0, ci, 0x87654321, 0)
@@ -2326,11 +2329,11 @@ def test_41_mul64_flags():
     assert r['res'] == 0x0 and r['aux'] == 0x1
     assert (r['flags'] & FLAG_S) == 0 and (r['flags'] & FLAG_Z) == 0 and (r['flags'] & FLAG_O) == 0
     # MULHI unsigned 0xFFFFFFFF^2: res=0xFFFFFFFE, aux=1, O=1 (hi!=0)
-    r = arith4(0xFFFFFFFF, 0xFFFFFFFF, 0, ArithMode.MULHI | 0x20, 0, write_flags=True)
+    r = arith4(0xFFFFFFFF, 0xFFFFFFFF, 0, ArithMode.MULHI, 0, write_flags=True, unsigned=True)
     assert r['res'] == 0xFFFFFFFE and r['aux'] == 0x1
     assert (r['flags'] & FLAG_O) != 0
     # MUL32ACC unsigned 0x10000^2: Z=0 (bit5-Loch gefixt)
-    r = arith4(0x10000, 0x10000, 0, ArithMode.MUL32ACC | 0x20, 0, write_flags=True)
+    r = arith4(0x10000, 0x10000, 0, ArithMode.MUL32ACC, 0, write_flags=True, unsigned=True)
     assert r['aux'] == 0x1
     assert (r['flags'] & FLAG_Z) == 0, "MUL32ACC_U Z falsch"   # war 1 (bit5-Loch)
     # PADD64-Referenz unveraendert: 0x100000000 -> Z=0
@@ -2551,6 +2554,234 @@ def test_44_imm_encode_decoder():
     assert not fails, f"FAIL {len(fails)}/500 Random-Werte nicht rekonstruierbar"
     print("  Fuzz: 500 Random-Werte alle rekonstruierbar")
     print("TEST 44 PASS")
+
+def test_45_sat_avg_abs_fix_regressions():
+    # Regressionen der ISS/Z3-Divergenz-Fixes (Fuzzer-Fund: arith4 signed/wrap-Semantik)
+    # Fix-Wurzel: negate_lanes 32-bit-Wrap; SATADD/ABSADD Bit31-Interp; 34-bit-Z3-Modelle.
+    print("=== arith4 Sat/AVG/ABS-Regressionen (Fuzzer-Fund) ===")
+    cases = [
+        # (modus, a, b, c, kwargs, erwartet)
+        (ArithMode.SATADD, 3172900312, 3954478238, 1524531412, {'unsigned': True}, 0xFFFFFFFF),  # USATADD: 3-Operanden-Overflow (33-bit-Kante)
+        (ArithMode.SATADD, 1198693087, 3670368414, 2618846537, {'unsigned': True, 'inv_2': True}, 0xFFFFFFFF),  # inv saturiert, kein Wrap
+        (ArithMode.SATADD, 0xFFFFFFFE, 2, 0, {'unsigned': True}, 0xFFFFFFFF),            # klassischer Clamp
+        (ArithMode.SATADD,  1754970413, 251619947, 2489235583, {'inv_3': True}, 0x7FFFFFFF),  # signed-Clamp (Bit31-Interp)
+        (ArithMode.SATADD,  976756811, 2707281860, 749451693, {'inv_1': True, 'inv_2': True, 'inv_3': True}, 0xF7BE4E44),  # negative Summe, kein Clamp
+        (ArithMode.SATADD,  0x7FFFFFFF, 1, 0, {}, 0x7FFFFFFF),                   # Clamp oben
+        (ArithMode.AVG,     1611833934, 3956422003, 2308943107, {'inv_2': True, 'inv_3': True}, 0x3A20366E),  # Bit31-Flip-Fix
+        (ArithMode.AVG,     0xFFFFFFFF, 0, 1, {}, 0x80000000),                   # Round-up 33-bit-Kante
+        (ArithMode.AVG,     3, 4, 0, {}, 3),                                     # Baseline
+        (ArithMode.ABSADD,  4021341755, 2227368644, 4145932741, {'inv_1': True, 'inv_3': True}, 0x9DF43AC4),  # |Bit31-Wert|
+        (ArithMode.ABSADD,  0x80000000, 0, 0, {}, 0x80000000),                   # |INT_MIN| wrap
+        (ArithMode.ABSADD,  0xFFFFFFFB, 3, 0, {}, 8),                            # |x|+3
+        (ArithMode.SLT,     1931323116, 3909455657, 3212933655, {}, 0),          # 34-bit-Carry (Bit33!=0, Bit32=0)
+    ]
+    for mode, a, b, c, kw, exp in cases:
+        r = arith4(a, b, c, mode, 0, **kw)['res']
+        assert r == exp, f"FAIL {mode.name} a={a:#x} b={b:#x} c={c:#x} kw={kw}: {r:#x} != {exp:#x}"
+        print(f"  {mode.name}({a:#x},{b:#x},{c:#x},{kw}) = {r:#x}")
+    print("TEST 45 PASS")
+
+def test_46_sqrom8():
+    # SQROM8: 8x8->16 via Quadrat-ROM (Elite-Trick), a=s1&0xFF, b=s2&0xFF.
+    # Formel: ((a+b)^2 - a^2 - b^2) >> 1; Q115 (pipeline_smt.py M20) bewiesen,
+    # Fuzzer-verifiziert. ROM T[n]=n^2 n in [0,510] = 512x18 = 9 Kbit.
+    print("=== arith4 SQROM8 (Quadrat-ROM 8x8) ===")
+    cases = [
+        (0x00000000, 0x00000000, 0x0000),  # 0*0
+        (0x000000FF, 0x000000FF, 0xFE01),  # 255*255 = 65025
+        (0x000000FE, 0x00000003, 0x02FA),  # 254*3 = 762
+        (0x000000FF, 0x00000002, 0x01FE),  # 255*2 = 510
+        (0x00000080, 0x00000080, 0x4000),  # 128*128 = 16384
+        (0x00000001, 0x000000FF, 0x00FF),  # 1*255
+        (0x00000005, 0x00000003, 0x000F),  # 5*3 = 15 (Baseline)
+        (0xDEAD0005, 0xBEEF0003, 0x000F),  # hohe Bits maskiert: 5*3
+        (0xFFFFFFFF, 0xFFFFFFFF, 0xFE01),  # 255*255 (volle Maskierung)
+        (0x00000000, 0x000000FF, 0x0000),  # 0*255
+    ]
+    for a, b, exp in cases:
+        r = arith4(a, b, 0, ArithMode.SQROM8, 0)['res']
+        assert r == exp, f"FAIL SQROM8 a={a:#x} b={b:#x}: {r:#x} != {exp:#x}"
+        print(f"  SQROM8({a:#x},{b:#x}) = {r:#x}")
+    print("TEST 46 PASS")
+
+def test_47_mul16_sqrom_microcode():
+    # 16x16 unsigned via 4x SQROM8 (Quadrat-ROM) + Schulbuch-Komposition
+    # (helpers.mul16_sqrom, 11 Passes). Q115 beweist die SQROM8-Formel; die
+    # Komposition ist z3-QF_BV-unbeweisbar (Q116 --stretch) -> hier konkret
+    # verifiziert (exakte Fälle + Random gegen Python-Referenz).
+    print("=== mul16_sqrom Mikrocode (4x SQROM8 + Komposition) ===")
+    import random
+    random.seed(42)
+    cases = [
+        (0x1234, 0x5678, 0x06260060),  # Baseline
+        (0xFFFF, 0xFFFF, 0xFFFE0001),  # Max-Werte
+        (0x0000, 0x1234, 0x00000000),  # Null
+        (0x8000, 0x8000, 0x40000000),  # 2^15^2 = 2^30
+        (0x00FF, 0xFF00, 0x00FE0100),  # 255*65280
+        (0x5555, 0xAAAA, 0x38E31C72),  # Muster
+        (0xABCD, 0xEF01, 0xA0650ECD),  # Zufall
+        (0xFFFFFFFF, 0x00000001, 0x0000FFFF),  # Maskierung
+        (0xDEADBEEF, 0xCAFEBABE, 0x8B475B62),  # Maskierung hoch
+    ]
+    for a, b, exp in cases:
+        r = mul16_sqrom(a, b)
+        assert r == exp, f"FAIL mul16_sqrom({a:#x},{b:#x}): {r:#x} != {exp:#x}"
+    for _ in range(500):
+        a = random.getrandbits(32)
+        b = random.getrandbits(32)
+        r = mul16_sqrom(a, b)
+        ref = (a & 0xFFFF) * (b & 0xFFFF)
+        assert r == ref, f"FAIL mul16_sqrom random({a:#x},{b:#x}): {r:#x} != {ref:#x}"
+    print("  exakte Fälle + 500 Random-Werte OK")
+    print("TEST 47 PASS")
+
+    # ===== TEST 48: DIV (K2-Semantik) — res=q, aux=rem, bit5 signed/unsigned =====
+    # C-Truncation (kein Floor!), div-by-zero definiert (q=-1, rem=s1, FLAG_O),
+    # MIN/-1 Overflow (q=MIN, rem=0, FLAG_O). Q118/Q119 (M21) decken die Semantik.
+    print("\n=== TEST 48: DIV (res=q, aux=rem) ===")
+    import random
+    random.seed(42)
+    def cq(q):  # signed q -> 32-bit-Wert
+        return q & 0xFFFFFFFF
+    cases = [
+        # (s1, s2, unsigned, exp_q, exp_rem)  — DIV: res=q, aux=rem
+        (100, 7, True, 14, 2),
+        (0xFFFFFFFF, 1, True, 0xFFFFFFFF, 0),
+        (0xFFFFFFFF, 0xFFFFFFFF, True, 1, 0),
+        (0xDEADBEEF, 0x00010000, True, 0xDEAD, 0xBEEF),
+        (0x80000000, 1, True, 0x80000000, 0),
+        (123, 0, True, 0xFFFFFFFF, 123),          # div-zero unsigned
+        (-7 & 0xFFFFFFFF, 2, False, cq(-3), cq(-1)),  # Truncation: -7/2 = -3, rem -1
+        (-7 & 0xFFFFFFFF, -2 & 0xFFFFFFFF, False, 3, cq(-1)),
+        (7, -2 & 0xFFFFFFFF, False, cq(-3), 1),
+        (0x80000000, 0xFFFFFFFF, False, 0x80000000, 0),  # MIN/-1 Overflow
+        (0x80000000, 1, False, 0x80000000, 0),     # MIN/1 ok
+        (0x7FFFFFFF, 0xFFFFFFFF, False, cq(-0x7FFFFFFF), 0),
+        (-123 & 0xFFFFFFFF, 0, False, 0xFFFFFFFF, -123 & 0xFFFFFFFF),  # div-zero signed
+        (0xFFFFFFFF, 0xFFFFFFFF, False, 1, 0),
+        (0x0000FFFF, 0x00010000, True, 0, 0xFFFF),  # q=0 -> Z-Flag
+    ]
+    for s1, s2, uns, exp_q, exp_rem in cases:
+        r = arith4(s1, s2, 0, ArithMode.DIV, 0, write_flags=True, unsigned=uns)
+        assert r['res'] == exp_q, f"FAIL DIV q: ({s1:#x},{s2:#x}) uns={uns}: {r['res']:#x} != {exp_q:#x}"
+        assert r['aux'] == exp_rem, f"FAIL DIV rem: ({s1:#x},{s2:#x}) uns={uns}: {r['aux']:#x} != {exp_rem:#x}"
+    # Flags: div-zero -> O (+ S bei negativem -1-Wert), MIN/-1 -> O, q=0 -> Z, q<0 -> S
+    r = arith4(123, 0, 0, ArithMode.DIV, 0, write_flags=True, unsigned=True)
+    assert r['flags'] & FLAG_O and r['flags'] & FLAG_S, f"FAIL div-zero flags: {r['flags']:#x}"
+    r = arith4(0x80000000, 0xFFFFFFFF, 0, ArithMode.DIV, 0, write_flags=True, unsigned=False)
+    assert r['flags'] & FLAG_O and r['flags'] & FLAG_S, f"FAIL MIN/-1 flags: {r['flags']:#x}"
+    r = arith4(5, 9, 0, ArithMode.DIV, 0, write_flags=True, unsigned=True)
+    assert r['flags'] & FLAG_Z and not (r['flags'] & FLAG_O), f"FAIL q=0 flags: {r['flags']:#x}"
+    r = arith4(5, 9, 0, ArithMode.DIV, 0, write_flags=False, unsigned=True)
+    assert r['flags'] == 0, f"FAIL write_flags=False: {r['flags']:#x}"
+    # Flags-Propagation: write_flags=False reicht flags_in durch (ADD-Konvention)
+    r = arith4(100, 7, 0, ArithMode.DIV, 0x2, write_flags=False, unsigned=True)
+    assert r['flags'] == 0x2, f"FAIL flags pass-through: {r['flags']:#x}"
+    # Random gegen Python-Referenz (C-Truncation-Semantik)
+    for _ in range(500):
+        s1 = random.getrandbits(32)
+        s2 = random.getrandbits(32)
+        if s2 != 0:
+            r = arith4(s1, s2, 0, ArithMode.DIV, 0, unsigned=True)
+            assert r['res'] == s1 // s2 and r['aux'] == s1 % s2, f"FAIL DIV_U random ({s1:#x},{s2:#x})"
+        i1 = s1 - 0x100000000 if (s1 & 0x80000000) else s1
+        i2 = s2 - 0x100000000 if (s2 & 0x80000000) else s2
+        if i2 != 0 and not (i1 == -0x80000000 and i2 == -1):
+            r = arith4(s1, s2, 0, ArithMode.DIV, 0, unsigned=False)
+            aq = abs(i1) // abs(i2)
+            eq = -aq if ((i1 < 0) != (i2 < 0)) else aq
+            er = i1 - eq * i2
+            assert r['res'] == (eq & 0xFFFFFFFF) and r['aux'] == (er & 0xFFFFFFFF), \
+                f"FAIL DIV_S random ({s1:#x},{s2:#x})"
+    print("  exakte Fälle + Flags + 500 Random-Werte OK")
+    print("TEST 48 PASS")
+
+def test_49_mulfma_pmul16():
+    # MULFMA (22, ADD s3+hi) / MULFMS (18, SUB s3-hi): res = s3 ± (s1*s2)>>32,
+    # aux = lo32. bit5=1 unsigned/0 signed (MUL32-Konvention). DSP-FMA ~0 LUT
+    # auf MUL32-Basis. MULFMS = Newton-Iteration r'=2r-b_n*r2hi in 1 Pass (M22).
+    # PMUL16 (16): res=lo16*lo16, aux=hi16*hi16 (MUL32-Quadranten-Split, ~50-100
+    # LUT Mux). unsigned-Steuersignal (True=unsigned, signed=Default 0); s3 frei.
+    print("=== arith4 MULFMA/MULFMS (FMA hi32) + PMUL16 (Packed 16x16) ===")
+    import random
+    random.seed(42)
+    M = MASK_RLEN
+    fma_cases = [
+        # (mode, unsigned, s1, s2, s3, res, aux)
+        (ArithMode.MULFMA, True,  5, 7, 100, 100, 35),          # hi=0, lo=35
+        (ArithMode.MULFMS, True,  5, 7, 100, 100, 35),          # 100-0
+        (ArithMode.MULFMA, True,  M, M, 100, 98, 1),            # hi=0xFFFFFFFE, lo=1
+        (ArithMode.MULFMS, True,  M, M, 100, 102, 1),           # 100-0xFFFFFFFE
+        (ArithMode.MULFMA, True,  M, M, M, M-2, 1),             # Carry-Wrap
+        (ArithMode.MULFMA, False, M, 2, 0, M, M-1),             # signed: (-1*2)>>32=-1, aux=-2
+        (ArithMode.MULFMS, False, M, 2, 0, 1, M-1),             # 0-(-1) = 1
+        (ArithMode.MULFMA, False, 0x80000000, 0x80000000, 0x7FFFFFFF, 0xBFFFFFFF, 0),
+        (ArithMode.MULFMS, False, 0x80000000, 0x80000000, 0x7FFFFFFF, 0x3FFFFFFF, 0),
+        (ArithMode.MULFMA, False, M, M, 0, 0, 1),               # (-1*-1)>>32=0, lo=1
+    ]
+    for mode, unsigned, s1, s2, s3, exp_res, exp_aux in fma_cases:
+        r = arith4(s1, s2, s3, mode, 0, unsigned=unsigned)
+        assert r['res'] == exp_res and r['aux'] == exp_aux, \
+            f"FAIL {mode.name} u={unsigned} ({s1:#x},{s2:#x},{s3:#x}): {r['res']:#x},{r['aux']:#x} != {exp_res:#x},{exp_aux:#x}"
+    # Flags: ADD-Carry+O+S, SUB-Borrow+O, Z
+    r = arith4(M, M, M, ArithMode.MULFMA, 0, write_flags=True, unsigned=True)
+    assert r['flags'] & FLAG_C and r['flags'] & FLAG_O and r['flags'] & FLAG_S, \
+        f"FAIL MULFMA add carry flags: {r['flags']:#x}"
+    r = arith4(M, M, 0, ArithMode.MULFMS, 0, write_flags=True, unsigned=True)
+    assert r['flags'] & FLAG_O and not (r['flags'] & FLAG_C), \
+        f"FAIL MULFMS borrow flags: {r['flags']:#x}"
+    r = arith4(0, 0, 0, ArithMode.MULFMA, 0, write_flags=True, unsigned=True)
+    assert r['flags'] & FLAG_Z, f"FAIL MULFMA Z flags: {r['flags']:#x}"
+    # Newton-Idiom: MULFMS(bn, r2hi, 2r) == 2r - hi(bn*r2hi) (M22-Iteration)
+    for _ in range(200):
+        r = random.getrandbits(32) | 0x80000000
+        bn = random.getrandbits(32) | 0x80000000
+        r2hi = ((r * r) & 0xFFFFFFFFFFFFFFFF) >> 32
+        hi = ((bn * r2hi) >> 32) & M
+        exp = ((2 * r) - hi) & M
+        got = arith4(bn, r2hi, (2 * r) & M, ArithMode.MULFMS, 0, unsigned=True)['res']
+        assert got == exp, f"FAIL MULFMS-Newton (r={r:#x},bn={bn:#x}): {got:#x} != {exp:#x}"
+    # PMUL16 exakt
+    pmul_cases = [
+        (0x00020003, 0x00040005, True, 0x0000000F, 0x00000008),  # 3*5, 2*4
+        (M, M, True, 0xFFFE0001, 0xFFFE0001),                    # 0xFFFF^2 beide
+        (0x80008000, 0x80008000, True, 0x40000000, 0x40000000),  # 2^15^2 = 2^30
+        (0xFFFF0000, 0x0000FFFF, True, 0, 0),                    # 0*0xFFFF, 0xFFFF*0
+        (0x12345678, 0x9ABCDEF0, True, 0x4B4D2080, 0x0B00A630),  # lo/hi Produkte
+        (0xFFFF0001, 0x00020002, False, 2, 0xFFFFFFFE),          # signed: 1*2, -1*2
+        (0xFFFFFFFF, 0xFFFFFFFF, False, 1, 1),                   # signed: (-1)*(-1)
+        (0x80008000, 0x80008000, False, 0x40000000, 0x40000000), # signed: (-2^15)^2
+    ]
+    for s1, s2, uns, exp_res, exp_aux in pmul_cases:
+        r = arith4(s1, s2, 0, ArithMode.PMUL16, 0, unsigned=uns)
+        assert r['res'] == exp_res and r['aux'] == exp_aux, \
+            f"FAIL PMUL16 ({s1:#x},{s2:#x},u={uns}): {r['res']:#x},{r['aux']:#x} != {exp_res:#x},{exp_aux:#x}"
+    # PMUL16 random gegen Referenz
+    for _ in range(500):
+        s1 = random.getrandbits(32)
+        s2 = random.getrandbits(32)
+        r_u = arith4(s1, s2, 0, ArithMode.PMUL16, 0, unsigned=True)
+        assert r_u['res'] == ((s1 & 0xFFFF) * (s2 & 0xFFFF)) & M and \
+               r_u['aux'] == (((s1 >> 16) * (s2 >> 16)) & M), f"FAIL PMUL16u random"
+        r_s = arith4(s1, s2, 0, ArithMode.PMUL16, 0, unsigned=False)
+        a = (s1 & 0xFFFF) - 0x10000 if (s1 & 0x8000) else (s1 & 0xFFFF)
+        b = (s2 & 0xFFFF) - 0x10000 if (s2 & 0x8000) else (s2 & 0xFFFF)
+        c = (s1 >> 16) - 0x10000 if (s1 & 0x80000000) else (s1 >> 16)
+        d = (s2 >> 16) - 0x10000 if (s2 & 0x80000000) else (s2 >> 16)
+        assert r_s['res'] == (a * b & M) and r_s['aux'] == (c * d & M), f"FAIL PMUL16s random"
+    # MULFMA random gegen Referenz
+    for _ in range(300):
+        s1 = random.getrandbits(32)
+        s2 = random.getrandbits(32)
+        s3 = random.getrandbits(32)
+        prod = s1 * s2
+        hi = (prod >> 32) & M
+        ra = arith4(s1, s2, s3, ArithMode.MULFMA, 0, unsigned=True)
+        rs = arith4(s1, s2, s3, ArithMode.MULFMS, 0, unsigned=True)
+        assert ra['res'] == (s3 + hi) & M and rs['res'] == (s3 - hi) & M, \
+            f"FAIL MULFMA random ({s1:#x},{s2:#x})"
+    print("  MULFMA/MULFMS/PMUL16 exakt + Flags + Random OK")
+    print("TEST 49 PASS")
 
 if __name__ == "__main__":
     sys.exit(run_tests())

@@ -12,39 +12,41 @@ ISA = contract; HW = abstracted. Small chip may be slow but complete.
 |---|------|------|------|
 | 0 | — | unused (res=0) | — |
 | 1 | **ADD** | s1+s2+s3; sub via inv_2/inv_3 | SCALAR |
-| 2 | **ADDC** | s1+s2+s3+C_flag | SCALAR |
+| 2 | **ADDC** | s1+s2+s3+Carry. inv_2=True → Subtract-with-Borrow (SUBB-Integration): Carry als Borrow c−1, res = a−b−1+c = a+~b+c (ARM SBC), C-out = kein-Borrow (Addierer-CarryOut) | SCALAR |
 | 3 | **PADD** | packed add, carry broken at lanes | op_type_1 |
-| 4 | **USATADD** | unsigned saturating add clamp 0xFFFFFFFF | SCALAR |
-| 5 | **SATADD** | saturating signed add | SCALAR |
+| 4 | frei | — (USATADD kollabiert in SATADD via unsigned=True) | — |
+| 5 | **SATADD** | saturating add: signed (clamp ±0x7FFFFFFF); unsigned=True → USATADD (clamp 0xFFFFFFFF) | SCALAR |
 | 6 | **AVG** | (s1+s2+(s3&1))>>1 rounding avg | SCALAR |
 | 7 | **ABSADD** | \|s1\|+s2+s3 | SCALAR |
 | 8 | **CMP** | cmp mask (0xFF/0xFFFF per lane) | op_type_1 |
-| 9 | frei | — | — |
-| 10 | **SLT** | signed < mask (s3: 1=<,0=≤; Sign-Flip-Borrow, overflow-sicher) | SCALAR |
-| 11 | **SLTU** | unsigned < mask | SCALAR |
-| 12 | **MFC** | carry_flag → 0/1 value | SCALAR |
+| 9 | **DIV** | 32×32 division: res=q, aux=rem. unsigned=True → unsigned / False → signed (MUL32-Konvention, orthogonaler arith4-Param). C-Truncation (kein Floor). div-by-zero definiert: q=0xFFFFFFFF, rem=s1, FLAG_O. signed MIN/−1: q=0x80000000, rem=0, FLAG_O. Flags S=q-Sign, Z=q==0, O=div-zero|overflow, C unverändert. RISC-V-Modern. Q117–Q119 (M21) beweisen 8-bit-Newton-Pfad, Fuzzer + TEST 48 verifiziert | SCALAR |
+| 10 | **SLT** | < mask (s3: 1=<,0=≤; unsigned=True → unsigned Vergleich = SLTU; signed: Sign-Flip-Borrow, overflow-sicher) | SCALAR |
+| 11 | frei | — (SLTU kollabiert in SLT via unsigned=True) | — |
+| 12 | frei | — (MFC → 40: interner Helper-Marker) | — |
 | 13 | **ADDSHIFT1** | s1+(s2<<1) lea ×3 | SCALAR |
 | 14 | **ADDSHIFT2** | s1+(s2<<2) lea ×5 | SCALAR |
-| 15 | **PMIN** | packed min (s3 bit0: sign) | op_type_1 |
-| 16 | frei | — | — |
-| 17 | **PMAX** | packed max (s3 bit0: sign) | op_type_1 |
-| 18 | frei | — | — |
-| 19 | **PSADD** | packed saturating add | op_type_1 |
+| 15 | **PMIN** | packed min (unsigned-Steuersignal: True=unsigned, signed=Default 0; s3 frei) | op_type_1 |
+| 16 | **PMUL16** | packed 16×16-MUL: res=lo(s1)·lo(s2), aux=hi(s1)·hi(s2) — 2 unabhängige Produkte (MUL32-Quadranten einzeln, nur Output-Mux ~50-100 LUT). unsigned-Steuersignal (True=unsigned). 32×32-Schoolbook lo/lo+hi/hi parallel, Karatsuba | WORD |
+| 17 | **PMAX** | packed max (unsigned-Steuersignal: True=unsigned, signed=Default 0; s3 frei) | op_type_1 |
+| 18 | **MULFMS** | FMA hi32 SUB: res = s3 − (s1·s2)>>32. unsigned=True → unsigned (MUL32-Konvention). aux=lo32. Newton-Iteration r′ = 2r − b_n·r2hi (M22-Pfad): 1 Pass statt 2 | SCALAR |
+| 19 | **PSADD** | packed saturating add/sub: inv_2=True → Sub (lane-correct Taps, INT_MIN-sicher; unsigned-Steuersignal; s3 frei) | op_type_1 |
 | 20 | frei | — | — |
-| 21 | **PSSUB** | packed saturating sub | op_type_1 |
-| 22 | frei | — | — |
+| 21 | frei | — (PSSUB kollabiert in PSADD via inv_2) | — |
+| 22 | **MULFMA** | FMA hi32 ADD: res = s3 + (s1·s2)>>32. unsigned=True → unsigned (MUL32-Konvention). aux=lo32 (0-cost Tap, MULHI-Symmetrie). DSP48E1 A·B+C eingebaut → ~0 LUT Zusatz auf MUL32-Basis. Akkumuliert Schoolbook-Kreuzterme / MAC im Mikrocode | SCALAR |
 | 23 | **PWADD** | (s1+(s1>>lb))&mask SWAR horiz | op_type_1 |
-| 24 | **PSADB** | s3+Σ\|byte(s1)-byte(s2)\| SAD | BYTE |
-| 25 | **SUBB** | s1-s2-s3-~C (ARM SBC, borrow=~C) | SCALAR |
+| 24 | **PSAD** | s3+Σ\|lane(s1)-lane(s2)\| SAD (BYTE=8/WORD=4/SCALAR=1 Lane, op_type_1) | op_type_1 |
+| 25 | frei | — (SUBB kollabiert in ADDC via inv_2) | — |
 | 26 | **MUL** | 16×16→32 unsigned (s1[15:0] * s2[15:0]) | SCALAR |
 | 27 | **MULADD** | s3 + 16×16→32 unsigned accumulate | SCALAR |
-| 28 | **MUL32** | 32×32→64. bit5=0=signed, bit5=1=unsigned. res=lo32, aux=hi32 | SCALAR |
-| 29 | **MULHI** | 32×32 hi32. bit5 selects signed/unsigned. res=hi32, aux=lo32 (symmetrisch zu MUL32) | SCALAR |
+| 28 | **MUL32** | 32×32→64. unsigned=True → unsigned, False → signed. res=lo32, aux=hi32 | SCALAR |
+| 29 | **MULHI** | 32×32 hi32. unsigned=True → unsigned (MUL32-Konvention). res=hi32, aux=lo32 (symmetrisch zu MUL32) | SCALAR |
 | 30 | **PADD64** | 64-bit Add (32-bit Lane-Break im Datapfad): s1+s3=lo, s2+aux_in+carry=hi. res=lo, aux=hi | SCALAR |
-| 31 | **MUL32ACC** | 32×32→64 MAC. bit5 selects signed/unsigned. prod=s1*s2, lo=prod_lo+s3, hi=prod_hi+aux_in+carry. res=lo, aux=hi | SCALAR |
+| 31 | **MUL32ACC** | 32×32→64 MAC. unsigned=True → unsigned (MUL32-Konvention). prod=s1*s2, lo=prod_lo+s3, hi=prod_hi+aux_in+carry. res=lo, aux=hi | SCALAR |
+| 32 | **SQROM8** | 8×8→16 via Quadrat-ROM (Elite-1985): A*B=((A+B)²−A²−B²)>>1, a=s1&0xFF, b=s2&0xFF. ROM T[n]=n², n∈[0,510] = 512×18 = 9 Kbit (1 BlockRAM / ~150 LUT-RAM; Masken-ROM ≈ 0). ROM-Alternative zu LUT/DSP-MUL8. 16×16/32×32 via Schoolbook-Mikrocode (4× SQROM8 + 3× Add). Q115 bewiesen (M20), Fuzzer + TEST 46 verifiziert | SCALAR |
+| 40 | **MFC** | INTERN (Marker: Nummer > 0x1F-Transportbereich = definitiv NICHT ISA-sichtbar; Analogie zur Fenster-Vision 'interne Helper ab 256'). Carry-Flag → 0/1 Wert, Mikrocode-Helper für Carry-Rettung (Carry-als-Datenwert). ISA-seitig durch loadmsr FLAGS, DST abgedeckt → kein eigener Opcode | — |
 
-Freed: 9,16,18,20,22 (5 slots).
-Lane width: op_type_1 (BYTE=8 / WORD=16 / SCALAR=32). s3 bit0: 0=unsigned 1=signed.
+Freed: 4, 11, 12, 20, 21, 25 (6 slots).
+Lane width: op_type_1 (BYTE=8 / WORD=16 / SCALAR=32). ±-Semantik bei ALLEN wählbaren Ops via unsigned-Steuersignal (True=unsigned, signed=Default 0); s3 ist bei PMIN/PMAX/PMUL16/PSADD komplett frei (s3-Bit0 war Encoding-Krücke, entfernt). Packed-Sub: PADD+inv_2 (wrapping) bzw. PSADD+inv_2 (saturierend, lane-correct Taps).
 
 ### BitFrobMode (bitfrob stage)
 | # | Name | What | LUT |
@@ -91,7 +93,7 @@ z3 verified (pipeline_smt.py M16, Q81-Q86, ∀ symbolic, 82 realisierbare + 3 un
 ### Infrastructure
 | Component | Bits | Cost | Notes |
 |-----------|------|------|-------|
-| **TernLut** (named constants) | 8-bit LUT | 68 LUT | 14 named values: CLR,AND,OR,XOR,NOT,ANDNOT,ANDNOT_C,ORC,MOV_A/B/C,SELECT_A/B,MANDN,SET |
+| **TernLut** (named constants) | 8-bit LUT | 68 LUT | 29 named values: CLR,AND,OR,XOR,NOT(=NOR3),ANDNOT,ANDNOT_C,ORC,MOV_A/B/C,SELECT_A/B,MANDN,SET,NOR,NAND,XNOR,XOR3,XNOR3,NAND3,MAJ,MIN,AND_C,IMPLY,IMPLY_C,ORC_C,MANDN_INV |
 | **OpType** per operand | 2-bit ×3 | 0 LUT | SCALAR/BYTE/WORD; decoder wires through control path |
 | **Aux line** | 32-bit + strobe | ~40 LUT + 4×32 FF | 2nd pipeline slot, per-stage tap, decoder-internal |
 | **prev_in_strobe** | 4-bit | 0 LUT | bits 1/2/4→inject prev into s1/s2/s3; bit 8→bypass |
@@ -99,12 +101,56 @@ z3 verified (pipeline_smt.py M16, Q81-Q86, ∀ symbolic, 82 realisierbare + 3 un
 | **mask_mode** (ternlog) | 1-bit | ~5 LUT | width-mask from src3_idx, frees bitfrob for shift |
 | **shift_ctrl** (permb) | 1-bit | ~30 LUT | AltiVec-lvsr-style: src3=shift amt 0..31, permb synthesizes byte-shift mask on-the-fly (byte part n>>3); bitfrob does fine part (n&7); shifted-out bytes→aux+FLAG_O. shift_left: direction. ⚠ braucht blank_enable=True (synthetisierte 0x80-Marker; mit False wird 0x80 als Index 0 gelesen → stilles Garbage, z3-M14-Befund) |
 
+### Encoding: Mode vs orthogonale Flags
+`mode_imm6` ist ein 6-bit **Transportfeld** (Probe-Encoding, ISS/Solver), nicht
+die finalen ISA-Adresse. Semantisch ist eine Op = Basis-Mode + orthogonale
+Flag/Helper-Signale; der Dekoder kann breite Leitungen ziehen (belegt: inv_1/2/3,
+op_type_1/2/3, cst_table, src3_idx, prev_in/aux_in, write/read_flags). Das
+signed/unsigned-Signal ist **kein Mode-Bit mehr**: `arith4(..., unsigned=...)`
+ist ein orthogonaler Param wie `inv` (Default False = signed, MUL32-Konvention).
+SLT/SATADD sind dadurch auf je EINEN Mode kollabiert (SLTU = SLT+unsigned=True,
+USATADD = SATADD+unsigned=True). Die früheren bit5-/getrennten-Mode-Encodings
+waren Probe-Versuche; `ARITH4_MODE_MASK`/`ARITH4_UMODE` in pipeline.py sind nur
+noch Doku-Masken, im Dispatch wird kein bit5 mehr gelesen.
+
+Fürs spätere Fenster-Mapping (noch NICHT festgelegt): `unsigned` wird ein
+Dekoder-Leitungs-Slot bzw. eine Feldbreiten-Wahl pro Fenster; die Op-Adressen
+werden dann umsortiert/neu gemappt (z.B. scalar mul/div ab 32, packed ab 64,
+float ab 128, interne Helper ab 256).
+
+±-Semantik-Inventar (was Ops wirklich brauchen) — **EIN Signal** für alles:
+- **unsigned-Flag, scalar (8 Ops, arith4-Param)**: SLT, SATADD, MUL32, MULHI,
+  MUL32ACC, MULFMA, MULFMS, DIV. Bei MUL32ACC/MULFMA/MULFMS ist s3 Daten → s3-bit0
+  dort unmöglich; bei MUL32/MULHI/DIV s3 frei, einheitliche Konvention spart
+  Mode-Adressen (1 Flag statt 2 Modes/Op).
+- **unsigned-Flag, packed (4 Ops, arith4-Param)**: PMIN, PMAX, PMUL16, PSADD —
+  früher s3-Bit0 (0=unsigned/1=signed), ad hoc-Accretion aus der
+  Prä-Flag-Ära; jetzt aufs selbe Signal gehoben, s3 bei Packed komplett frei
+  (nutzbar z.B. als Akkumulator/Addend/Maske). Konventions-Inversion beim
+  Umstieg: intern `signed = not unsigned`.
+- **feste Semantik (Rest, kein Flag)**: MUL/MULADD/SQROM8 = unsigned;
+  PADD/CMP/AVG/ABSADD/ADDSHIFT/PSAD/PWADD/PADD64 = fest.
+
+WRF-Prinzip (write/read-flag, ISA-sichtbar): jede Instruktion hat ein WRF-Bit —
+ob sie Flags schreibt (dort wo's sinnvoll) oder auf bestehende hört (dort wo's
+sinnvoll). Damit schützt sich eine ADDC-Kaskade selbst (Sub = ADDC+inv_2, SUBB kollabiert): Zwischen-Glieder
+(Zwischensummen, Adressberechnung LEA-Stil, Schleifenzähler-Dekrement, das nur
+eine Register-Bedingung braucht) schreiben schlicht `write_flags=False`. Nur wer
+wirklich Flags braucht (ADD/ADDC mit -Ziel-Vergleich) lässt den Ausgang an.
+Eine reine Kaskade braucht daher KEIN Carry-Retten in Register — MFC existiert
+nur noch für den Carry-als-Datenwert-Fall (Schoolbook-Kreuzterme o.ä.), nicht
+für die Kette. Marker-Praxis: Ops, die definitiv interne Helper sind (MFC=40),
+liegen über dem 0x1F-Transportbereich — Nummer = Marker, keine ISA-Adresse.
+
 ---
 
 ## What's Free (1 pass, no new HW)
 
 ### Arithmetic
-ADD, SUB (inv), ADDC (carry-in+out), SUBB (borrow-in+out, ARM SBC), NEG (inv or dec constant), ABS (ABSADD), SATADD (saturating signed), USATADD (unsigned sat clamp 0xFFFFFFFF), AVG (rounding average), ADDSHIFT1/2 (lea ×3/×5). MUL 16×16→32 (unsigned). MUL32/MULHI 32×32→64 signed AND unsigned (bit5=1 → zero-extend operands, same multiplier array, 0 LUT extra). MUL32ACC signed+unsigned MAC (bit5). PADD64 64-bit add via dual 32-bit adder (s1+s3=lo, s2+aux+carry=hi, ~64 LUT extra). MUL 16×16→32 unsigned (1 pass, ~250 LUT or DSP). MULADD accumulate. MUL32 32×32→64 signed (1 pass, ~500 LUT or DSP), aux=hi32. MULHI 32×32 signed hi32. MUL32ACC 32×32→64 signed MAC (1 pass, DSP cascade: MUL + dual adder). 32×32 unsigned microcode path also possible from 16×16 primitives (6-8 passes). MAC = MUL32 + MUL32ACC = 2 passes. 64-bit mul flags (MUL32/MULHI, pragmatisch): S = Sign des vollen 64-Bit-Produkts (Bit31 des High-Worts), Z = ganzes 64-Bit null, O = 32-Bit-Sicht exakt (unsigned: hi==0; signed: hi==SignExt(lo)). MULHI aux=lo32 (MUL32 aux=hi32 — Paar-Konvention, MAC-Kette nutzt es). MUL32ACC bit5-maskiert in Flags (Z korrekt fuer unsigned).
+ADD, SUB (inv), ADDC (carry-in+out; inv_2=True → Subtract-with-Borrow, ARM SBC, C-out=kein-Borrow), NEG (inv or dec constant), ABS (ABSADD), SATADD/U (saturating add: signed clamp ±0x7FFFFFFF / unsigned=True → USATADD clamp 0xFFFFFFFF), AVG (rounding average), ADDSHIFT1/2 (lea ×3/×5). MUL 16×16→32 (unsigned). MUL32/MULHI 32×32→64 signed AND unsigned (unsigned=True → zero-extend operands, same multiplier array, 0 LUT extra). MUL32ACC signed+unsigned MAC (unsigned-Param). MULFMA/MULFMS (22/18): FMA auf hi32, res = s3 ± (s1·s2)>>32, unsigned-Param, DSP48E1 A·B+C eingebaut → ~0 LUT auf MUL32-Basis; MULFMS = Newton-Iteration r′=2r−b_n·r2hi 1 Pass (M22), MULFMA akkumuliert Schoolbook-Kreuzterme. PMUL16 (16): 2× 16×16 parallel (MUL32-Quadranten-Split, nur Output-Mux ~50-100 LUT), unsigned-Steuersignal, lo/lo+hi/hi für Schoolbook/Karatsuba. PADD64 64-bit add via dual 32-bit adder (s1+s3=lo, s2+aux+carry=hi, ~64 LUT extra). MUL 16×16→32 unsigned (1 pass, ~250 LUT or DSP). MULADD accumulate. MUL32 32×32→64 signed (1 pass, ~500 LUT or DSP), aux=hi32. MULHI 32×32 signed hi32. MUL32ACC 32×32→64 signed MAC (1 pass, DSP cascade: MUL + dual adder). 32×32 unsigned microcode path also possible from 16×16 primitives (6-8 passes; mit PMUL16+MULADD ≈ 5-6). MAC = MUL32 + MUL32ACC = 2 passes. 64-bit mul flags (MUL32/MULHI, pragmatisch): S = Sign des vollen 64-Bit-Produkts (Bit31 des High-Worts), Z = ganzes 64-Bit null, O = 32-Bit-Sicht exakt (unsigned: hi==0; signed: hi==SignExt(lo)). MULHI aux=lo32 (MUL32 aux=hi32 — Paar-Konvention, MAC-Kette nutzt es). MUL32ACC unsigned-bereinigt in Flags (Z korrekt fuer unsigned).
+
+### Division
+DIV (9): res=Quotient(s1/s2), aux=Rest (MULHI-Symmetrie, 0-cost Tap). unsigned=True → unsigned / False → signed (MUL32-Konvention, orthogonaler arith4-Param), s3 ungenutzt. C-Truncation (KEIN Python-Floor; signed q=-3 rest -1 bei -7/2). div-by-zero DEFINiert (nicht UNDEF, Z3/Fuzzer-freundlich): q=0xFFFFFFFF (signed −1), rem=s1, FLAG_O. signed Overflow MIN/−1: q=0x80000000 (MIN), rem=0, FLAG_O. Flags: S=q-Sign, Z=q==0, O=div-zero|overflow, C unverändert. RISC-V-Modern statt PDP-11/CDC-6000/S-360-Exception; Overflow trapbar via System/Trap-Flag-Bitmaske (bra/brl/bxx-Konvention), keine Exception-Ebene. 3 Impl-Pfade: HW-Radix-2 (1 Pass, ~800 LUT) | Newton-Raphson (MUL32-Targets, Reziprok-ROM 256×32 = 8 Kbit, 2-3 Iterationen ~8-12 Passes) | shift-subtract+CLZ-Skip (0 Ressourcen, ~130 Passes). Q117–Q119 (M21) beweisen 8-bit-Newton (Normalisierung+±1-Korrektur), Fuzzer + TEST 48 verifiziert (z3-Modell: UDiv/URem bzw. Abs+Vorzeichen, da z3py kein SDiv hat).
 
 ### Compare & Flags
 SLT/SLTU mask (signed/unsigned <,≤; SLT = Sign-Flip-Borrow, gleiche HW wie SLTU, overflow-sicher — z3 M12 Q61/Q62), CMP packed mask, flags write (S,Z,C,O), MFC (carry→register), test/bittest (ternlog AND+LZC/TZC). permb blank-event → FLAG_O (presence/validity signal, free metadata; write_flags off prevents congestion). BITSET_ADD x+(1<<n) (permb shift_ctrl LSL + ROL fine + ADD, 1 pass, z3 M14 Q73). SUBNET /n (MASKW(32-n)+NOT, 1 pass, /32-Edge = Decode-Sonderfall).
@@ -118,7 +164,7 @@ CMOV: bitfrob MASK(c≠0) → ternlog SELECT → 1 pass.
 Scalar min/max: PMIN/PMAX with op_type=SCALAR → 1 pass.
 
 ### Packed (SIMD) Family
-PADD (add), PADD+inv_2 (wrapping sub), CMP (mask), PMIN/PMAX (min/max), PSADD/PSSUB (saturating add/sub). All lane widths via op_type_1.
+PADD (add), PADD+inv_2 (wrapping sub), CMP (mask), PMIN/PMAX (min/max), PSADD (saturating add; +inv_2 → saturating sub). All lane widths via op_type_1.
 
 ### Shifts & Rotates
 LSR/LSL/ASR/ROR/ROL fine (0..7 bits, 1 pass). BITREV8 (0-cost cross-wiring). Byte-multiple rotates via permb escape vectors (1 pass for rotate, 2 for shift). Dynamic byte shift: permb shift_ctrl (src3=amt 0..31, synthesizes mask on-the-fly, AltiVec-lvsr style; fine part n&7 in bitfrob; ⚠ blank_enable=True nötig). SHR_STICKY (fine LSR + sticky/guard for float rounding, shifted-out→aux+FLAG_O). ⚠ bitfrob LSL leaket s2 (res=(s1<<f)|(s2>>(32-f)), s2 muss 0 sein) während permb shift_ctrl den Wert in s2 braucht → ROL ist s2-sicher, wrappt aber s1 ((s1>>(32-f))-Term): Wert 1 in s2 → ROL sicher (BITSET-Trick); dichte Werte → MASKW+NOT statt Shift. Operanden-Platzierung: MASKW-Breite → s3, shift_ctrl-Menge → s3, LSL-Wert → s1, LSR-Wert → s2.
@@ -127,7 +173,7 @@ LSR/LSL/ASR/ROR/ROL fine (0..7 bits, 1 pass). BITREV8 (0-cost cross-wiring). Byt
 SEXT (sign-extend 1 pass). UBFX lsb≤7 (ROR+AND, 1 pass). BFI lsb=0 (ternlog SELECT, 1 pass). UBFX lsb>7 / BFI lsb>0: 2 macro-steps (shift→writeback→blend). Mask created by decoder from immediate.
 
 ### Count / Pop / Scan / Parity
-LZC, TZC (1 pass). POPCNT_N/B (SWAR popcount per nibble/byte, 1 pass). Full 32-bit popcount: 3-step microcode. Byte-scan: CMP+LZC. PWADD (pairwise widen-add, SWAR horiz sum, 1 pass). PSADB (sum-of-absolute-differences, 1 pass). PARITY_B/W (byte/word parity, 1 pass); nibble parity via ternlog AND 0x11111111; halfword via byte parity XOR.
+LZC, TZC (1 pass). POPCNT_N/B (SWAR popcount per nibble/byte, 1 pass). Full 32-bit popcount: 3-step microcode. Byte-scan: CMP+LZC. PWADD (pairwise widen-add, SWAR horiz sum, 1 pass). PSAD (sum-of-absolute-differences, 1 pass; BYTE/WORD/SCALAR via op_type_1 — Video-SAD für Motion-Estimation). PARITY_B/W (byte/word parity, 1 pass); nibble parity via ternlog AND 0x11111111; halfword via byte parity XOR.
 
 ### GF(2) / CRC / Crypto
 CLMUL_LO/HI (GF(2) byte multiply, 1 pass). POLY_RED (GF(2) reduction, 1 pass). Full GF(2⁸) multiply: 3 passes (CLMUL_LO+HI+POLY_RED). xtime: LSL+POLY_RED (2 passes). CRC32 Barrett: ~6-8 macro-steps. Hash mix constants in ARITH_CST.
@@ -154,7 +200,7 @@ Binary↔Gray: 2c (shift+ternlog XOR). ALPHA zap/extr: 2-3c (ternlog+strobe). In
 | SADDI x+((y<<sh)^m) | 2 | ROL fine + ternlog XOR → arith4 ADD (4 Werte > 3 Operanden-Slots; z3 M14 Q74) |
 | Boothe step | 2 | MASK(MplierBit) + LSL+mask_mode+ADD |
 | Full BMM (nibble microcode) | ~10 | 8× BMAT_N + permb position + ternlog XOR |
-| Multi-word subtract (64-bit) | 2 | SUBB lo + SUBB hi (C flag flows between steps) |
+| Multi-word subtract (64-bit) | 2 | ADDC+inv_2 lo + ADDC+inv_2 hi (C/Borrow flows between steps) |
 | Full 32×32→64 signed multiply | 1 | MUL32/MULHI |
 | Full 32×32→64 unsigned multiply | 1 | MUL32/MULHI bit5=1 |
 | Full 32×32→64 multiply (unsigned, no HW) | 6-8 | Schoolbook: 4× MUL16 + 3× PWADD/ADD |
@@ -201,10 +247,10 @@ Fine shifts (0..7) all modes. BITREV8. Byte multiples via permb escape. Full rot
 CMOV 1 pass. Scalar min/max 1 pass (PMIN/PMAX SCALAR). Blend via ternlog SELECT.
 
 ### F: SIMD/Packed — DONE
-PADD/CMP/PMIN/PMAX/PSADD/PSSUB unified via op_type_1. Wrapping sub = PADD+inv_2. Saturating scalar sub = PSSUB SCALAR (new). Packed mul = gap #5.
+PADD/CMP/PMIN/PMAX/PSADD unified via op_type_1. Wrapping sub = PADD+inv_2. Saturating sub = PSADD+inv_2 (lane-correct, INT_MIN-sicher; PSSUB-Mode kollabiert). Packed mul = gap #5.
 
 ### G: Count/Pop/Scan/Parity — DONE
-LZC/TZC 1 pass. POPCNT_N/B 1 pass. Full popcnt 3-step. PWADD 1 pass. PSADB 1 pass. Byte-scan 2-3c. PARITY_B/W 1 pass.
+LZC/TZC 1 pass. POPCNT_N/B 1 pass. Full popcnt 3-step. PWADD 1 pass. PSAD 1 pass. Byte-scan 2-3c. PARITY_B/W 1 pass.
 
 ### H: String — MICROCODE
 All expressible via CMP+LZC/TZC+permb in 2-4 passes. No dedicated HW needed.
@@ -217,6 +263,19 @@ Hash mixes (ADD+ROT+XOR) composable. AES S-box: composite path viable, dedicated
 
 ### K: Special Integer — DONE
 Log2/log10 1-pass. MUL 16×16→32 1-pass. MUL32/MULHI 32×32→64 signed+unsigned 1-pass (bit5 flag, same multiplier array, 0 LUT extra). MUL32ACC signed+unsigned MAC 1-pass. Schoolbook unsigned 32×32 without DSP = 6-8 microcode. Magic mul helpers via ARITH_CST.
+SQROM8 (32): Quadrat-ROM 8×8→16, Q115 bewiesen (M20), Fuzzer + TEST 46. 16×16 via `helpers.mul16_sqrom` (4× SQROM8 + Schulbuch, 11 Passes: 2× permb-LSR8-Escape + 4× SQROM8 + ADD-cross + LSL16/LSL8 + 2× ADD; SQROM8 maskiert intern, low/cross-Quadranten ohne Extraktion). TEST 47 + 500 Random. Kompositions-Beweis = Q116 --stretch (z3-QF_BV-Grenze, offen). Karatsuba-Variante (3× SQROM9, 9×9-ROM 1024×20 = 20 Kbit) möglich, signed via sign-magnitude.
+
+### K2: Division — ENTWURF (nicht ratifiziert, änderbar)
+**DIV (Mode 33):** res = Quotient(s1/s2), aux = Rest(s1 mod s2) — MULHI-Symmetrie (0-cost Tap). bit5=0 signed, bit5=1 unsigned (MUL32-Konvention). s3 ungenutzt (0).
+**Semantik: RISC-V-modern, C-Truncation** (KEIN Python-Floor!):
+- unsigned: q = s1//s2, rem = s1%s2
+- signed: trunc(a/b): |a|//|b| + Vorzeichen = a⊕b; rem-Vorzeichen = Dividend (C-Regel)
+- div-by-zero: q = 0xFFFFFFFF (signed: −1), rem = s1, FLAG_O — **definiert, kein UNDEF** (Z3/Fuzzer-freundlich)
+- signed-Overflow MIN/−1: q = 0x80000000, rem = 0, FLAG_O
+- Flags: S = q-Sign, Z = q==0, O = div-zero|overflow, C unverändert
+- Bewusst KEINE Legacy-Semantik (PDP-11/CDC-6000 Reste/NaN-Eigenheiten, S/360 Exception).
+**Impl-Pfade (hinter einem Macro-Op, wie MUL32):** HW-Mode Radix-2 (großes Target, 1 Pass, ~800 LUT) | Newton-Raphson (MUL32-Targets: Reziprok-ROM 256×32 = 8 Kbit via ARITH_CST-Mechanik, 2-3 Iterationen ≈ 8-12 Passes; Z3-beweisbar wie Q115) | shift-subtract + CLZ-Skip (Notfall, 0 Ressourcen, ~130 Passes variabel).
+**Trap-Option (Design-Notiz, Control-Instruktions-Konvention):** FLAG_O (div-zero|overflow) trapbar via System/Trap-Instruktion mit Flag-Bitmaske (bra/brl/bxx-Stil) — Exceptions OHNE Exception-Ebene in der Pipeline. MSR-artiger Trap-Enable-Schalter optional. Kein HW-Exception-Pfad nötig.
 
 ### L: Exotic/Niche — MOSTLY MICROCODE
 Gray↔Binary done. BITZIP_8/BITUNZIP_8 1 pass bitfrob, scalar via permb. GFNI_AFFINE 1 pass. BITSWAP 1 pass. 8×8 transpose demo (6c). BMM, BCD, blends, soft-float — microcode-able or deferred.
@@ -239,7 +298,7 @@ Gray↔Binary done. BITZIP_8/BITUNZIP_8 1 pass bitfrob, scalar via permb. GFNI_A
 | CLMUL_B (LO+HI, shared AND-plane) | ~120 | 1.8× |
 | POLY_RED | ~60 | 0.9× |
 | PWADD | ~35 | 0.5× |
-| PSADB | ~110 | 1.6× |
+| PSAD | ~110 | 1.6× |
 
 All post-bitfrob modes stay ternlog-class (≤2×). True costly blocks: integer mul (>7×), wide barrel (>5×), AES S-box ROM.
 

@@ -24,35 +24,70 @@ FLAG_O = (1 << 3)
 # IntEnum: Werte weiterhin int-kompatibel, aber benannt.
 class ArithMode(IntEnum):
     ADD       = 1  # s1 + s2 + s3 (Sub via inv_2/inv_3)
-    ADDC      = 2  # + Carry-Flag (Flags)
+    ADDC      = 2  # Add with Carry: res = a+b+s3+c (C aus Flags). inv_2=True -> Subtract-with-
+                   #   Borrow (SUBB-Integration): Carry-Beitrag als Borrow c-1, res = a-b-1+c =
+                   #   a+~b+c (ARM SBC). C-out = "kein-Borrow" (Addierer-CarryOut der Summe).
+                   #   '25' (SUBB) kollabiert hierher; Kern: a + Komplemente + Carry-Slot.
     PADD      = 3  # Packed Add (Lane-Breite via op_type_1: BYTE=8, WORD=16, SCALAR=32)
-    USATADD   = 4  # Unsigned Saturating Add (umgekippt = 0xFFFFFFFF)
-    SATADD    = 5  # Saturating Add (signed)
+    SATADD    = 5  # Saturating Add: signed (clamp +-0x7FFFFFFF); unsigned=True = USATADD (clamp 0xFFFFFFFF)
     AVG       = 6  # Rounding Average
     ABSADD    = 7  # |s1| + s2 + s3
     CMP       = 8  # Cmp Mask (0xFF/0xFFFF pro Lane via op_type_1)
-    # 9 frei (war CMPW, per op_type zusammengelegt)
-    SLT       = 10 # SLT mask (signed, s3=1 -> <, s3=0 -> <=)
-    SLTU      = 11 # SLTU mask (unsigned)
-    MFC       = 12 # Carry-Flag -> 0/1 Wert
+    DIV       = 9  # 32x32 Division: res=Quotient(s1/s2), aux=Rest (MULHI-Symmetrie, 0-cost Tap).
+                   # bit5=1 unsigned / 0 signed (MUL32-Konvention). s3 ungenutzt.
+                   # C-Truncation (KEIN Python-Floor!). div-by-zero DEFINiert: q=0xFFFFFFFF (-1),
+                   # rem=s1, FLAG_O. signed Overflow MIN/-1: q=0x80000000, rem=0, FLAG_O.
+                   # Flags: S=q-Sign, Z=q==0, O=div-zero|overflow, C nicht abgeleitet.
+                   # RISC-V-Modern statt PDP-11/CDC-6000/S-360-Exception. Q117-Q119 (M21)
+                   # beweisen 8-bit-Newton-Pfad; Q118/Q119 decken div-zero/rem-Semantik.
+    SLT       = 10 # SLT mask: signed (s3=1 -> <, s3=0 -> <=); unsigned=True = SLTU
+    # 12 frei (MFC verschoben auf 40)
+    MFC       = 40 # INTERN (Marker: Nummer ueber dem 0x1F-Transportbereich = definitiv
+                   #   nicht ISA-sichtbar, wie Fenster-Vision 'interne Helper ab 256').
+                   #   Carry-Flag -> 0/1 Wert (Mikrocode-Helper, Carry in Register retten).
     ADDSHIFT1 = 13 # s1 + (s2<<1) (lea / *3)
     ADDSHIFT2 = 14 # s1 + (s2<<2) (lea / *5)
     # --- Packed Familie: nur per-Lane Carry-Chain-Taps, kein neuer Block ---
-    # Lane-Breite kommt aus op_type_1 (BYTE=8, WORD=16, SCALAR=32). 16/18/20/22 frei.
-    PMIN      = 15 # Packed Min (s3 Bit0: 0=unsigned, 1=signed; SCALAR -> skalares Min, 1 Schritt)
+    # Lane-Breite via op_type_1 (BYTE=8, WORD=16, SCALAR=32). 20 frei.
+    PMIN      = 15 # Packed Min (unsigned-Steuersignal: True=unsigned, signed=Default 0; SCALAR -> skalares Min, 1 Schritt)
+    PMUL16    = 16 # Packed 16x16-MUL: res = lo(s1)*lo(s2), aux = hi(s1)*hi(s2) — 2 unabhaengige
+                   # Produkte, MUL32-Quadranten einzeln herausgefuehrt (kein Addierer-Baum,
+                   # nur Output-Mux ~50-100 LUT). unsigned-Steuersignal (True=unsigned).
+                   # Nutzen: 32x32-Schoolbook (lo/lo+hi/hi parallel), Karatsuba.
     PMAX      = 17 # Packed Max (dito)
-    PSADD     = 19 # Packed Saturating Add (s3 Bit0: 0=unsigned, 1=signed; SCALAR = SATADD)
-    PSSUB     = 21 # Packed Saturating Sub (dito; SCALAR = saturierendes skalares Sub)
-    # 22 frei
+    PSADD     = 19 # Packed Saturating Add/Sub: inv_2=True -> lane-correct Sub (INT_MIN-sicher); unsigned-Steuersignal; SCALAR = saturierendes skalar. Add/Sub
+    # 21 frei (PSSUB kollabiert in PSADD via inv_2)
+    MULFMA    = 22 # FMA hi32 ADD: res = s3 + (s1*s2)>>32. unsigned=True → unsigned (MUL32-
+                   # Konvention; bit4 in 16-31 immer gesetzt -> KEIN +/- -Flag, daher
+                   # MULFMS=18 fuer die SUB-Variante). aux=lo32 (0-cost Tap, MULHI-Symmetrie).
+                   # DSP48E1 A*B+C eingebaut -> ~0 LUT Zusatz auf MUL32-Basis.
+                   # Akkumuliert 32x32-Schoolbook-Kreuzterme / MAC im Mikrocode.
+    MULFMS    = 18 # FMA hi32 SUB: res = s3 - (s1*s2)>>32. unsigned-Steuersignal (wie MULFMA).
+                   # Newton-Iteration r'=2r-b_n*r2hi (M21/M22-Pfad): 1 Pass statt 2.
     PWADD     = 23 # Pairwise Widen-Add: (s1 + (s1>>lb)) & Maske — SWAR-Horizontalsumme, 1 Addierer-Ebene, Shift = feste Verdrahtung (kein Barrel!)
-    PSADB     = 24 # PSumAbs Bytes: s3 + Summe |byte_i(s1) - byte_i(s2)| (Video-SAD, USADA8-Stil; s3 = Akkumulator)
-    SUBB      = 25 # Subtract-with-Borrow: s1-s2-s3-(~C). Formel: s1+~s2+s3+C (ARM SBC). Kein inv_2 (Komplement explizit)
+    PSAD      = 24 # PSumAbs SAD: s3 + Summe |lane_i(s1) - lane_i(s2)| (Video-SAD, USADA8-Stil;
+                   #   Lane via op_type_1: BYTE=8 Lanes, WORD=4 Lanes, SCALAR=|s1-s2|; s3=Akkumulator)
+    # 25 frei (SUBB kollabiert in ADDC via inv_2)
     MUL       = 26 # 16x16->32 unsigned (s1[15:0] * s2[15:0]). DSP/200-300 LUT. Full 32x32 via Mikrocode
     MULADD    = 27 # s3 + (s1[15:0] * s2[15:0]) unsigned. Akkumulator fuer 32x32 Mikrocode
     MUL32     = 28 # 32x32->64. bit5=0=signed, bit5=1=unsigned. res=lo32, aux=hi32. DSP/~500 LUT
     MULHI     = 29 # 32x32 hi32. bit5 selects signed/unsigned. res=obere 32 Bit. Gleicher MUL-Array
     PADD64    = 30 # 64-bit Add (32-bit Lane-Break im Datapfad): s1+s3=lo, s2+aux_in+carry_lo=hi. res=lo, aux=hi. 2. 32-Bit Adder (~64 LUT)
     MUL32ACC  = 31 # 32x32->64 MAC. bit5 selects signed/unsigned. prod=s1*s2, lo=prod_lo+s3, hi=prod_hi+aux+carry. DSP MAC-Kaskade
+    SQROM8    = 32 # 8x8->16 via Quadrat-ROM (Elite-1985-Trick): A*B=((A+B)^2-A^2-B^2)>>1.
+                   # a=s1&0xFF, b=s2&0xFF. ROM T[n]=n^2, n in [0,510] = 512x18 = 9 Kbit
+                   # (1 BlockRAM / ~150 LUT-RAM; Masken-ROM: fast null). ROM-Alternative
+                   # zum LUT/DSP-MUL8; 16x16/32x32 via Schoolbook-Mikrocode.
+
+# --- Encoding: orthogonale Signale aus der Nummer extrahiert ---
+# mode_imm6 ist ein 6-bit-Transportfeld (Probe-Encoding). Semantisch ist eine
+# Op = (Basis-Mode + orthogonale Flag/Helper-Signale); der Dekoder hat breite
+# Leitungen. Wo das +/-/-Flag landet (bit5, s3-bit0, separater Leitungs-Slot,
+# Fenster ab 32/64/128/256) ist spaetere Mapping-Entscheidung — hier nur die
+# benannten Masken, damit die Semantik nicht in magischen Hex-Zahlen steckt.
+ARITH4_MODE_MASK = 0x1F   # Basis-Mode aus dem 6-bit mode_imm6
+ARITH4_UMODE     = 0x20   # bit5: unsigned-Flag (MUL32-Konvention; 6 Ops:
+                          #   MUL32/MULHI/MUL32ACC/MULFMA/MULFMS/DIV)
 
 # bitfrob Modes (Stufe 2). 0..29 belegt.
 class BitFrobMode(IntEnum):
@@ -112,7 +147,7 @@ class TernLut(IntEnum):
     AND      = 0xC0 # a & b  (Idx 6,7)
     OR       = 0xFC # a | b  (alles ausser a=b=0)
     XOR      = 0x3C # a ^ b  (Idx 2,3,4,5)
-    NOT      = 0x01 # ~a     (mit b=c=0; Idx 0)
+    NOT      = 0x01 # ~(a|b|c) — NOR3; "~a" nur bei b=c=0 (Idx 0). Alias: NOR3
     ANDNOT   = 0x30 # a & ~b (Idx 4,5)
     ANDNOT_C = 0x50 # a & ~c (Idx 4,6)
     ORC      = 0xF3 # a | ~b (alles ausser a=0,b=1)
@@ -123,6 +158,23 @@ class TernLut(IntEnum):
     SELECT_B = 0xD8 # b wenn c sonst a
     SET      = 0xFF # alle 1
     MANDN    = 0x6A # (a & b) ^ c — Masked-AND mit XOR-Maske (Baugh-Wooley-Komposition, 1 Pass)
+    # --- NOT-Familie (De Morgan-Komplemente) ---
+    NOR       = 0x03 # ~(a|b) — NOR (De Morgan: ~a & ~b)
+    NAND      = 0x3F # ~(a&b) — NAND (De Morgan: ~a | ~b)
+    XNOR      = 0xC3 # ~(a^b) — XNOR (Gleichheitstest)
+    # --- 3-Input-Familie (Parity/Majority) ---
+    XOR3      = 0x96 # a^b^c — 3-Input-Parity (auch 0x96 in Tests als Magic-Literal)
+    XNOR3     = 0x69 # ~(a^b^c)
+    NAND3     = 0x7F # ~(a&b&c)
+    NOR3      = 0x01 # ~(a|b|c) — identisch zu NOT (IntEnum-Alias)
+    MAJ       = 0xE8 # (a&b)|(b&c)|(a&c) — Majority
+    MIN       = 0x17 # ~MAJ — Minority
+    # --- ANDNOT/ORC-Komplemente ---
+    AND_C     = 0xA0 # a & c (b egal)
+    IMPLY     = 0xCF # ~a|b — Implikation (a -> b)
+    IMPLY_C   = 0xAF # ~a|c
+    ORC_C     = 0xF5 # a|~c
+    MANDN_INV = 0x95 # ~((a&b)^c) — invertiertes MANDN
 
 
 def negate_lanes(x, op_type):
@@ -141,7 +193,7 @@ def negate_lanes(x, op_type):
         t = a + b
         z = (~x) ^ b
         return (t & 0x7FFF7FFF) | ((((z >> 15) ^ (t >> 15)) & 0x00010001) << 15)
-    return -x
+    return (-x) & MASK_RLEN  # 32-bit-Zweierkomplement-Wrap (signed-negativ wuerde Python-Vergleiche/Shifts verfaelschen)
 
 
 # Look into imm.md for ideas about more built-in constants
@@ -666,7 +718,7 @@ def bitfrob(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv
 
 # [x] arm64-style imm creation -> imm_encode(val, width=32): zero/maskw/replicate/signext/permb/synthesize, 16 smoke tests
 
-# [x] Packed versions -> arith4: PADD/CMP/PMIN/PMAX/PSADD/PSSUB/PWADD/PSADB (Lane via op_type)
+#[x] Packed versions -> arith4: PADD/CMP/PMIN/PMAX/PSADD/PWADD/PSAD (Lane via op_type)
 
     flags = 0
     if write_flags:
@@ -1086,7 +1138,11 @@ ARITH_CST = array('Q', [
      0x0000000000800000,  # 31: Min-Normal (dup, Platzhalter)
 ])
 
-def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_3=False, prev_in=0, prev_in_strobe=0, src3_idx=0, cst_table=False, write_flags=False, read_flags=False, internal_table=False, op_type_1=OpType.SCALAR, op_type_2=OpType.SCALAR, op_type_3=OpType.SCALAR, aux_in=0, aux_strobe=0):
+def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_3=False, prev_in=0, prev_in_strobe=0, src3_idx=0, cst_table=False, write_flags=False, read_flags=False, internal_table=False, op_type_1=OpType.SCALAR, op_type_2=OpType.SCALAR, op_type_3=OpType.SCALAR, aux_in=0, aux_strobe=0, unsigned=False):
+    """ arith4-Auswertung. unsigned = orthogonales Steuersignal (DeDekoder-Leitung,
+        NICHT in mode_imm6 gepackt — fuer ops_survey 'Encoding: Mode vs Flags').
+        MUL32-Konvention: False=signed, True=unsigned. SLT: True=SLTU. SATADD:
+        True=USATADD. """
     """ Stufe 4: Arithmetik & Carry Chain """
 
 #TODO: add switch to use prev_in based on ... mode? hidden flag? insert where?
@@ -1120,10 +1176,16 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
 
     res = 0
     aux_cmp = s3  # default: bei CMP-Mode ueberschrieben mit XOR-Diff (per-Lane, 0-cost Tap)
+    div_zero_or_ovf = False  # DIV-Dispatch setzt True (div-zero/overflow); hier vorab fuer pyright
     if mode_imm6 == ArithMode.ADD: # Normal Add (Sub = Add mit inv_2/inv_3, kein eigenes SUB noetig)
         res = s1 + s2 + s3
-    elif mode_imm6 == ArithMode.ADDC: # Add with carry (from flags)
-        res = s1 + s2 + s3 + (1 if (flags_in & FLAG_C) else 0)
+    elif mode_imm6 == ArithMode.ADDC: # Add with Carry (Flags). inv_2=True = SUBB-Integration:
+        #   b dreht Vorzeichen (negate_lanes, Zeile 1161: -b) und der Carry-Beitrag wird
+        #   Borrow (c-1 statt c) -> res = a - b - 1 + c = a + ~b + c (ARM SBC). Der
+        #   Addierer-CarryOut dieser Summe IST "kein-Borrow" (a+~b+c >= 2^32  <=> a >=
+        #   b+borrow) -> der Flags-Branch braucht C-keinen-Sonderfall. Kern: a + Komp + Slot.
+        c_add = (1 if (flags_in & FLAG_C) else 0) - (1 if inv_2 else 0)
+        res = s1 + s2 + s3 + c_add
     elif mode_imm6 == ArithMode.PADD: # Packed Add: Carry-Kette per Lane aufgetrennt (Lane-Breite via op_type_1)
         lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
         lm = 0x7F7F7F7F if lane_bits == 8 else (0x7FFF7FFF if lane_bits == 16 else 0x7FFFFFFF)
@@ -1131,16 +1193,22 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         t = (s1 & lm) + (s2 & lm)
         x = (s1 ^ s2) & MASK_RLEN
         res = (t & lm) | ((((x >> (lane_bits - 1)) ^ (t >> (lane_bits - 1))) & gm) << (lane_bits - 1))
-    elif mode_imm6 == ArithMode.SATADD: # Saturating Add (signed, mit inv_2 -> saturating Sub)
-        sm = s1 + s2 + s3
-        res = 0x7FFFFFFF if sm > 0x7FFFFFFF else (0x80000000 if sm < -0x80000000 else sm)
-    elif mode_imm6 == ArithMode.USATADD: # Unsigned Saturating Add (clamp 0xFFFFFFFF)
-        full = s1 + s2 + s3
-        res = MASK_RLEN if full > MASK_RLEN else full & MASK_RLEN
+    elif mode_imm6 == ArithMode.SATADD: # Saturating Add: unsigned=True -> USATADD (clamp 0xFFFFFFFF)
+        if unsigned:
+            full = s1 + s2 + s3
+            res = MASK_RLEN if full > MASK_RLEN else full & MASK_RLEN
+        else:  # signed-32-Interpretation: Bit31 -> Wert - 2^32 (auf echter Summe saturieren)
+            s1s = s1 - (MASK_RLEN + 1) if s1 & 0x80000000 else s1
+            s2s = s2 - (MASK_RLEN + 1) if s2 & 0x80000000 else s2
+            s3s = s3 - (MASK_RLEN + 1) if s3 & 0x80000000 else s3
+            sm = s1s + s2s + s3s
+            res = 0x7FFFFFFF if sm > 0x7FFFFFFF else (0x80000000 if sm < -0x80000000 else sm & MASK_RLEN)
     elif mode_imm6 == ArithMode.AVG: # Rounding Average (s1+s2+round)>>1, round = s3&1
         res = (s1 + s2 + (s3 & 1)) >> 1
-    elif mode_imm6 == ArithMode.ABSADD: # Abs-Add |s1| + s2 + s3 (Vorzeichen von s1 waehlt Negation)
-        res = (-s1 if s1 < 0 else s1) + s2 + s3
+    elif mode_imm6 == ArithMode.ABSADD: # Abs-Add |s1| + s2 + s3 (Vorzeichen = Bit31)
+        av = s1 & MASK_RLEN
+        absa = ((MASK_RLEN - av + 1) & MASK_RLEN) if (av & 0x80000000) else av  # 2^32-av (mod 2^32) bei Bit31
+        res = absa + (s2 & MASK_RLEN) + (s3 & MASK_RLEN)
     elif mode_imm6 == ArithMode.CMP: # Cmp Mask: 0xFF/0xFFFF pro Lane wo s1==s2 (per-Lane Zero-Detect, kein Borrow)
         lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
         lm = 0x7F7F7F7F if lane_bits == 8 else (0x7FFF7FFF if lane_bits == 16 else 0x7FFFFFFF)
@@ -1151,18 +1219,23 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         z = ~(y | x | lm) & MASK_RLEN
         m = (z >> (lane_bits - 1)) & gm
         res = ((m << lane_bits) - m) & MASK_RLEN
-    elif mode_imm6 == ArithMode.SLT: # SLT mask (signed): all-ones wenn s1 < s2 (s3=1) bzw. s1 <= s2 (s3=0)
-        # Sign-Flip: signed Vergleich via Unsigned-Borrow (Overflow-sicher, gleiche HW wie SLTU).
+    elif mode_imm6 == ArithMode.SLT: # SLT mask: all-ones wenn s1 < s2 (s3=1) bzw. s1 <= s2 (s3=0)
+        # unsigned=True = SLTU: unsigned Vergleich, Carry-Out = kein Borrow (ARM-Style C=1).
+        # signed (Default): Sign-Flip-Operanden, dann Unsigned-Borrow (Overflow-sicher, gleiche HW).
         # s3=1 -> a<b, s3=0 -> a<=b. inv_2 bleibt bewusst ignoriert (raw src2), wie bisher.
-        ca = (s1 & MASK_RLEN) ^ 0x80000000
-        cb = (src2 & MASK_RLEN) ^ 0x80000000
-        t33 = (ca & MASK_RLEN) + ((~cb) & MASK_RLEN) + (s3 & MASK_RLEN)   # Python, nativer 33-Bit-Carry
-        res = MASK_RLEN if (t33 >> 32) == 0 else 0
-    elif mode_imm6 == ArithMode.SLTU: # SLTU mask (unsigned): all-ones wenn s1 <u s2 (s3=1) bzw. s1 <=u s2 (s3=0)
-        # Carry-Out des Addierers = kein Borrow -> Maske (ARM-Style: C=1 heisst "kein Borrow")
-        full = (s1 & MASK_RLEN) + (~(src2 & MASK_RLEN) & MASK_RLEN) + (s3 & MASK_RLEN)
-        res = MASK_RLEN if (full >> RLEN) == 0 else 0
-    elif mode_imm6 == ArithMode.MFC: # MFC: Carry-Flag -> 0/1 Wert (fuer Multiword-Add, Carry in Register retten)
+        if unsigned:
+            full = (s1 & MASK_RLEN) + (~(src2 & MASK_RLEN) & MASK_RLEN) + (s3 & MASK_RLEN)
+            res = MASK_RLEN if (full >> RLEN) == 0 else 0
+        else:
+            ca = (s1 & MASK_RLEN) ^ 0x80000000
+            cb = (src2 & MASK_RLEN) ^ 0x80000000
+            t33 = (ca & MASK_RLEN) + ((~cb) & MASK_RLEN) + (s3 & MASK_RLEN)   # Python, nativer 33-Bit-Carry
+            res = MASK_RLEN if (t33 >> 32) == 0 else 0
+    elif mode_imm6 == ArithMode.MFC: # MFC (Mode 40, INTERN-Marker): Carry-Flag -> 0/1 Wert.
+        # Mikrocode-Helper fuer Carry-Rettung; bewegt sich NICHT in der sichtbaren ISA
+        # (dort deckt loadmsr FLAGS, DST das ab). write/read_flags-Kette der Pipeline
+        # macht Carry-Rettung in reinen ADDC-Kaskaden ueberfluessig (Zwischen-Ops
+        # schreiben schlicht keine Flags); bleibt fuer Carry-als-Datenwert-Faelle.
         res = 1 if (flags_in & FLAG_C) else 0
     elif mode_imm6 == ArithMode.ADDSHIFT1: # AddShifted LSL#1: s1 + (s2<<1) (lea / *3; feste Verdrahtung, 0 Gates)
         res = s1 + ((s2 & MASK_RLEN) << 1)
@@ -1172,7 +1245,7 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
         lane_max = (1 << lane_bits) - 1
         sign_flip = 1 << (lane_bits - 1)
-        signed = (s3 & 1) != 0       # s3 Bit 0: 0=unsigned, 1=signed (wie SLT)
+        signed = not unsigned  # unsigned-Steuersignal (True=unsigned, signed=Default 0); s3 bleibt frei
         is_max = mode_imm6 == ArithMode.PMAX
         for i in range(RLEN // lane_bits):
             av = (s1 >> (i * lane_bits)) & lane_max
@@ -1183,16 +1256,21 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
                 cb ^= sign_flip
             a_gt = 1 if (ca + (~cb & lane_max)) > lane_max else 0  # Carry-Out der Lane = a > b
             res |= (bv if (a_gt != is_max) else av) << (i * lane_bits)
-    elif mode_imm6 in (ArithMode.PSADD, ArithMode.PSSUB): # Saturating Add/Sub: Overflow via Carry-Taps (cin XOR cout; Lane via op_type_1)
+    elif mode_imm6 == ArithMode.PSADD: # Saturating Add/Sub: Overflow via Carry-Taps (cin XOR cout; Lane via op_type_1)
+        # inv_2=True -> lane-correct Sub (a + ~b + 1 via Taps, NICHT -b-Wrap: INT_MIN-Lane 0x80
+        # wuerde auf sich selbst mappen und a-0x80 statt a+0x80 liefern -> falsche Saturation).
+        # s1/s2 sind bei inv_1/inv_2 bereits lane-negativ (negate_lanes, Zeile 1161); der
+        # sub-Pfad nimmt deshalb raw src2. '21' (PSSUB) kollabiert in diesen Mode.
         lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
         lane_max = (1 << lane_bits) - 1
         sign_bit = 1 << (lane_bits - 1)
         low_mask = sign_bit - 1
-        signed = (s3 & 1) != 0
-        is_sub = mode_imm6 == ArithMode.PSSUB
+        signed = not unsigned  # unsigned-Steuersignal (True=unsigned, signed=Default 0); s3 bleibt frei
+        is_sub = inv_2
         for i in range(RLEN // lane_bits):
             av = (s1 >> (i * lane_bits)) & lane_max
-            bv = (s2 >> (i * lane_bits)) & lane_max
+            raw = (src2 if is_sub else s2)
+            bv = (raw >> (i * lane_bits)) & lane_max
             be = (~bv) & lane_max if is_sub else bv   # Sub = Add mit Komplement
             carry_into_top = 1 if ((av & low_mask) + (be & low_mask) + (1 if is_sub else 0)) > low_mask else 0
             sfull = av + be + (1 if is_sub else 0)
@@ -1219,18 +1297,18 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
             res = (s1 + (s1 >> 16)) & 0x0000FFFF
         else: # SCALAR: degeneriert zu s1 + s2 (volles Add)
             res = (s1 + s2) & MASK_RLEN
-    elif mode_imm6 == ArithMode.PSADB: # PSumAbs Bytes: s3 + Summe |byte(s1) - byte(s2)| (Video-SAD)
-        # HW: 8x (8-Bit-Sub mit Borrow-Out) + Select-Mux + 7-Addierer-Reduktionsbaum + 1 Akkumulator-Add.
+    elif mode_imm6 == ArithMode.PSAD: # PSumAbs SAD: s3 + Summe |lane(s1) - lane(s2)| (Video-SAD; Lane via op_type_1)
+        # HW: n x (lb-Bit-Sub mit Borrow-Out) + Select-Mux + (n-1)-Addierer-Reduktionsbaum + 1 Akku-Add.
+        # s3 = Akkumulator (SAD in laufende Summe addieren). Q90/Q90w (M17) beweisen
+        # BYTE/WORD-Identitaet gegen 9/17-Bit-Vorzeichen-Referenz.
+        lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
+        lane_mask = (1 << lane_bits) - 1
         sad = 0
-        for i in range(8):
-            av = (s1 >> (i * 8)) & 0xFF
-            bv = (s2 >> (i * 8)) & 0xFF
+        for i in range(RLEN // lane_bits):
+            av = (s1 >> (i * lane_bits)) & lane_mask
+            bv = (s2 >> (i * lane_bits)) & lane_mask
             sad += (av - bv) if av >= bv else (bv - av)
         res = (s3 + sad) & MASK_RLEN
-    elif mode_imm6 == ArithMode.SUBB: # Subtract-with-Borrow (ARM SBC: s1-s2-s3-~C = s1+~s2+s3+C)
-        # inv_2 ignoriert (src2 direkt verwendet), inv_1/inv_3 normal wirksam
-        # C=1: kein Borrow, C=0: Borrow um 1 extra abziehen
-        res = s1 + (~src2 & MASK_RLEN) + s3 + (1 if (flags_in & FLAG_C) else 0)
     elif mode_imm6 == ArithMode.MUL: # 16x16->32 unsigned
         a = s1 & 0xFFFF
         b = s2 & 0xFFFF
@@ -1239,8 +1317,32 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         a = s1 & 0xFFFF
         b = s2 & 0xFFFF
         res = (s3 + a * b) & MASK_RLEN
-    elif (mode_imm6 & 0x1F) == ArithMode.MUL32: # 32x32->64. bit5=unsigned. res=lo32, aux=hi32
-        unsigned = bool(mode_imm6 & 0x20)
+    elif mode_imm6 == ArithMode.SQROM8: # 8x8->16 via Quadrat-ROM (Elite-Trick)
+        # A*B = ((A+B)^2 - A^2 - B^2) >> 1, unsigned 8x8, a=s1&0xFF, b=s2&0xFF.
+        # (A+B) in 9 bit (max 510), Quadrat-Diff in 18 bit ((A+B)^2 <= 260100 < 2^18;
+        # stets >= A^2+B^2, da Kreuzterm 2AB >= 0 -> nie negativ). res <= 65025.
+        # Q115 bewiesen (pipeline_smt.py M20), Fuzzer-verifiziert.
+        a = s1 & 0xFF
+        b = s2 & 0xFF
+        sq = (a + b) * (a + b)
+        res = ((sq - a * a - b * b) >> 1) & MASK_RLEN
+    elif mode_imm6 == ArithMode.PMUL16: # Packed 16x16-MUL: res=lo*lo, aux=hi*hi
+        # 2 unabhaengige 16x16-Produkte parallel (MUL32-Quadranten einzeln
+        # herausgefuehrt, kein Addierer-Baum -> nur Output-Mux ~50-100 LUT).
+        # unsigned-Steuersignal: True=unsigned, signed=Default 0 (Packed-Konvention). 32x32-Schoolbook:
+        # lo/lo + hi/hi in 1 Pass, Kreuzterme via MULFMA/MUL16. s3 bleibt frei.
+        signed_p = not unsigned
+        if signed_p:
+            i1a = (s1 & 0xFFFF) - 0x10000 if (s1 & 0x8000) else (s1 & 0xFFFF)
+            i1b = (s1 >> 16) - 0x10000 if (s1 & 0x80000000) else (s1 >> 16)
+            i2a = (s2 & 0xFFFF) - 0x10000 if (s2 & 0x8000) else (s2 & 0xFFFF)
+            i2b = (s2 >> 16) - 0x10000 if (s2 & 0x80000000) else (s2 >> 16)
+            res = (i1a * i2a) & MASK_RLEN
+            aux_cmp = (i1b * i2b) & MASK_RLEN
+        else:
+            res = ((s1 & 0xFFFF) * (s2 & 0xFFFF)) & MASK_RLEN
+            aux_cmp = ((s1 >> 16) * (s2 >> 16)) & MASK_RLEN
+    elif (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MUL32: # 32x32->64. bit5=unsigned. res=lo32, aux=hi32
         if unsigned:
             prod = (src1 & MASK_RLEN) * (src2 & MASK_RLEN)  # 64-bit unsigned
         else:
@@ -1249,8 +1351,7 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
             prod = i1 * i2  # 64-bit signed
         res = prod & MASK_RLEN
         aux_cmp = (prod >> 32) & MASK_RLEN
-    elif (mode_imm6 & 0x1F) == ArithMode.MULHI: # 32x32 hi32, aux=lo32. bit5=unsigned
-        unsigned = bool(mode_imm6 & 0x20)
+    elif (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MULHI: # 32x32 hi32, aux=lo32. bit5=unsigned
         if unsigned:
             prod = (src1 & MASK_RLEN) * (src2 & MASK_RLEN)  # 64-bit unsigned
         else:
@@ -1265,8 +1366,7 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         hi = (s2 & MASK_RLEN) + (aux_in & MASK_RLEN) + carry_lo
         res = lo & MASK_RLEN
         aux_cmp = hi & MASK_RLEN
-    elif (mode_imm6 & 0x1F) == ArithMode.MUL32ACC: # 32x32->64 MAC. bit5=unsigned
-        unsigned = bool(mode_imm6 & 0x20)
+    elif (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MUL32ACC: # 32x32->64 MAC. bit5=unsigned
         if unsigned:
             prod = (src1 & MASK_RLEN) * (src2 & MASK_RLEN)  # 64-bit unsigned
         else:
@@ -1280,9 +1380,58 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         hi = (prod_hi & MASK_RLEN) + (aux_in & MASK_RLEN) + carry_lo
         res = lo & MASK_RLEN
         aux_cmp = hi & MASK_RLEN
+    elif (mode_imm6 & ARITH4_MODE_MASK) in (ArithMode.MULFMA, ArithMode.MULFMS): # FMA hi32: res = s3 ± (s1*s2)>>32
+        # DSP48E1 A*B+C eingebaut -> ~0 LUT Zusatz auf MUL32-Basis (Addierer-Baum
+        # speist 3. Operanden statt nur 2-Output). bit5=1 unsigned/0 signed (MUL32-
+        # Konvention). MULFMA=ADD s3+hi, MULFMS=SUB s3-hi (bit4 ist in Modes 16-31
+        # immer gesetzt -> kein +/- -Flag, zwei Modes statt dessen). aux=lo32 (0-cost
+        # Tap). MULFMS: Newton-Iteration r'=2r-b_n*r2hi (M21/M22-32-bit-Pfad) 1 Pass
+        # statt 2; MULFMA: Schoolbook-Kreuzterm-/MAC-Akkumulation.
+        sub = (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MULFMS
+        if unsigned:
+            prod = (src1 & MASK_RLEN) * (src2 & MASK_RLEN)  # 64-bit unsigned
+        else:
+            i1 = src1 - 0x100000000 if (src1 & SMASK_32) else src1
+            i2 = src2 - 0x100000000 if (src2 & SMASK_32) else src2
+            prod = i1 * i2  # 64-bit signed
+        prod_hi = (prod >> 32) & MASK_RLEN
+        if sub:
+            res = (s3 - prod_hi) & MASK_RLEN
+        else:
+            res = (s3 + prod_hi) & MASK_RLEN
+        aux_cmp = prod & MASK_RLEN
+    elif (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.DIV: # 32x32 Div. bit5=1 unsigned / 0 signed. res=q, aux=rem
+        d = src2 & MASK_RLEN
+        div_zero_or_ovf = False
+        if d == 0:
+            # definiert (K2): div-by-zero -> q=0xFFFFFFFF (-1), rem=s1, FLAG_O
+            q = 0xFFFFFFFF
+            r = src1 & MASK_RLEN
+            div_zero_or_ovf = True
+        elif unsigned:
+            a = src1 & MASK_RLEN
+            q = a // d
+            r = a % d
+        else:
+            i1 = src1 - 0x100000000 if (src1 & SMASK_32) else src1
+            i2 = src2 - 0x100000000 if (src2 & SMASK_32) else src2
+            if i1 == -0x80000000 and i2 == -1:
+                # signed Overflow: MIN/-1 -> q=0x80000000 (MIN), rem=0, FLAG_O
+                q = 0x80000000
+                r = 0
+                div_zero_or_ovf = True
+            else:
+                aq = abs(i1) // abs(i2)
+                q = -aq if ((i1 < 0) != (i2 < 0)) else aq
+                r = i1 - q * i2      # C-Rest: Vorzeichen folgt Dividend (KEIN Python-Floor-%)
+                q = q & MASK_RLEN
+                r = r & MASK_RLEN
+        res = q
+        aux_cmp = r
 # Packed Sub via op_type: PADD + inv_2 + op_type_2=BYTE/WORD = Per-Lane-Negation
-# (wrapping Sub ohne Saturation; PSSUB bleibt fuer saturierenden Sub — negate von INT_MIN klappt nicht)
-# Skalares Min/Max: PMIN/PMAX mit op_type_1=SCALAR = 1 Schritt (unsigned: s3=0, signed: s3=1).
+# (wrapping Sub ohne Saturation). PSADD+inv_2 = saturierender Sub (lane-correct Taps,
+# INT_MIN-sicher — negate von INT_MIN wuerde auf sich selbst mappen und falsch saturieren).
+# Skalares Min/Max: PMIN/PMAX mit op_type_1=SCALAR = 1 Schritt (unsigned-Steuersignal: True=unsigned).
 # 2-Schritt-Variante (SLT-Mask + ternlog select) weiterhin moeglich wenn Flags gewuenscht.
 # AddShifted = bitfrob shift + add hier.
 # Packed Familie direkt: nur per-Lane Carry-Chain-Taps (Borrow/Overflow), Lane-Breite via op_type_1.
@@ -1321,15 +1470,15 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         flags = flags if ((res & SMASK_32) == 0) else flags | FLAG_S
         flags = flags if not res == 0 else flags | FLAG_Z
         # C/O nur wo die 3-Eingangs-Addierkette die Semantik traegt
-        if mode_imm6 in (ArithMode.ADD, ArithMode.ADDC, ArithMode.SUBB, ArithMode.ADDSHIFT1, ArithMode.ADDSHIFT2):
+        if mode_imm6 in (ArithMode.ADD, ArithMode.ADDC, ArithMode.ADDSHIFT1, ArithMode.ADDSHIFT2):
             u1 = s1 & MASK_RLEN; u2 = s2 & MASK_RLEN; u3 = s3 & MASK_RLEN
             i1 = u1 - 0x100000000 if (u1 & SMASK_32) else u1
             i2 = u2 - 0x100000000 if (u2 & SMASK_32) else u2
             i3 = u3 - 0x100000000 if (u3 & SMASK_32) else u3
-            c_in = 1 if ((mode_imm6 == ArithMode.ADDC or mode_imm6 == ArithMode.SUBB) and (flags_in & FLAG_C)) else 0
+            c_in = 1 if (mode_imm6 == ArithMode.ADDC and (flags_in & FLAG_C)) else 0
             raw_u = u1 + u2 + u3 + c_in
             raw_i = i1 + i2 + i3 + c_in
-            if mode_imm6 == ArithMode.SUBB:
+            if mode_imm6 == ArithMode.ADDC and inv_2:  # SUBB-Integration (Borrow-Zweig)
                 u2_raw = src2 & MASK_RLEN
                 raw_u = u1 + (~u2_raw & MASK_RLEN) + u3 + c_in
                 if not cst_table:
@@ -1346,7 +1495,7 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
                 flags |= FLAG_C
             if raw_i > 0x7FFFFFFF or raw_i < -0x80000000:
                 flags |= FLAG_O
-        elif mode_imm6 == ArithMode.SLTU:
+        elif mode_imm6 == ArithMode.SLT and unsigned:
             u1 = s1 & MASK_RLEN; u2 = s2 & MASK_RLEN; u3 = s3 & MASK_RLEN
             if u1 + (~u2 & MASK_RLEN) + u3 > MASK_RLEN:
                 flags |= FLAG_C
@@ -1359,8 +1508,7 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
             if aux_cmp & SMASK_32: flags |= FLAG_S
             if res == 0 and aux_cmp == 0: flags |= FLAG_Z
             if carry_hi: flags |= FLAG_C
-        elif (mode_imm6 & 0x1F) == ArithMode.MUL32ACC:
-            unsigned = bool(mode_imm6 & 0x20)
+        elif (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MUL32ACC:
             if unsigned:
                 prod = (src1 & MASK_RLEN) * (src2 & MASK_RLEN)  # 64-bit unsigned
             else:
@@ -1374,19 +1522,44 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
             if aux_cmp & SMASK_32: flags |= FLAG_S
             if res == 0 and aux_cmp == 0: flags |= FLAG_Z
             if carry_hi: flags |= FLAG_C
-        elif (mode_imm6 & 0x1F) in (ArithMode.MUL32, ArithMode.MULHI):
+        elif (mode_imm6 & ARITH4_MODE_MASK) in (ArithMode.MUL32, ArithMode.MULHI):
             # 64-Bit-Ergebnis: S = Sign des vollen Produkts (Bit31 des High-Worts),
             # Z = ganzes 64-Bit-Ergebnis null, O = 32-Bit-Sicht exakt (Truncation verlustfrei).
             # bit5: unsigned. Pragmatische Flags statt puristischer Orthogonalitaet.
             flags = 0
-            hi_word = res if (mode_imm6 & 0x1F) == ArithMode.MULHI else aux_cmp
-            lo_word = aux_cmp if (mode_imm6 & 0x1F) == ArithMode.MULHI else res
+            hi_word = res if (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MULHI else aux_cmp
+            lo_word = aux_cmp if (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MULHI else res
             if hi_word & SMASK_32: flags |= FLAG_S
             if res == 0 and aux_cmp == 0: flags |= FLAG_Z
             if mode_imm6 & 0x20:   # unsigned: exakt wenn hi == 0
                 if hi_word != 0: flags |= FLAG_O
             else:                  # signed: exakt wenn hi == SignExt(lo)
                 if hi_word != (0xFFFFFFFF if (lo_word & SMASK_32) else 0): flags |= FLAG_O
+        elif (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.DIV:
+            # K2: S=q-Sign, Z=q==0, O=div-zero|signed-overflow, C nicht abgeleitet.
+            flags = 0
+            if res & SMASK_32: flags |= FLAG_S
+            if res == 0: flags |= FLAG_Z
+            if div_zero_or_ovf: flags |= FLAG_O
+        elif (mode_imm6 & ARITH4_MODE_MASK) in (ArithMode.MULFMA, ArithMode.MULFMS):
+            # S/Z aus Basis (res). C=Carry(ADD)/no-borrow(SUB, SUBB-Konvention:
+            # C=1 kein Borrow), O=Wrap (pragmatisch C==O, Akku-32-bit-Sicht).
+            sub = (mode_imm6 & ARITH4_MODE_MASK) == ArithMode.MULFMS
+            if unsigned:
+                prod = (src1 & MASK_RLEN) * (src2 & MASK_RLEN)
+            else:
+                i1 = src1 - 0x100000000 if (src1 & SMASK_32) else src1
+                i2 = src2 - 0x100000000 if (src2 & SMASK_32) else src2
+                prod = i1 * i2
+            hi = (prod >> 32) & MASK_RLEN
+            if sub:
+                borrow = (s3 & MASK_RLEN) < hi
+                if not borrow: flags |= FLAG_C
+                if borrow: flags |= FLAG_O
+            else:
+                carry = ((s3 & MASK_RLEN) + hi) > MASK_RLEN
+                if carry: flags |= FLAG_C
+                if carry: flags |= FLAG_O
     else:
         flags = flags_in
 
@@ -1420,7 +1593,7 @@ def execute_pipeline(in_a, in_b, in_c, ctrl, prev_in, flags_in, debug=False):
     res3 = ternlog(in_a, in_b, in_c, ti['tern_lut'], res2['flags'], res2['res'], ti['prev_in_strobe'], ti['src3_idx'], ti['cst_table'], ti['write_flags'], ti['read_flags'], ti['internal_table'], ti.get('mask_mode', False), res2['aux'], ti.get('aux_strobe', 0))
     if debug: print(f"ternlog:{hex(res3['res'])}  aux={hex(res3['aux'])}")
     ai = ctrl['arith4']
-    res4 = arith4(in_a, in_b, in_c, ai['mode_imm6'], res3['flags'], ai['inv_1'], ai['inv_2'], ai['inv_3'], res3['res'], ai['prev_in_strobe'], ai['src3_idx'], ai['cst_table'], ai['write_flags'], ai['read_flags'], ai['internal_table'], ai.get('op_type_1', OpType.SCALAR), ai.get('op_type_2', OpType.SCALAR), ai.get('op_type_3', OpType.SCALAR), res3['aux'], ai.get('aux_strobe', 0))
+    res4 = arith4(in_a, in_b, in_c, ai['mode_imm6'], res3['flags'], ai['inv_1'], ai['inv_2'], ai['inv_3'], res3['res'], ai['prev_in_strobe'], ai['src3_idx'], ai['cst_table'], ai['write_flags'], ai['read_flags'], ai['internal_table'], ai.get('op_type_1', OpType.SCALAR), ai.get('op_type_2', OpType.SCALAR), ai.get('op_type_3', OpType.SCALAR), res3['aux'], ai.get('aux_strobe', 0), ai.get('unsigned', False))
     return res4
 
 

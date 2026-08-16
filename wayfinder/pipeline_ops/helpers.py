@@ -38,15 +38,13 @@ __all__ = [  # explizit, damit `from helpers import *` auch Unterstrich-Namen bi
     'sx64',
     'mul32_hw',
     'mulhi_hw',
-    'MUL32_U',
-    'MULHI_U',
     'mul32u_hw',
     'mulhiu_hw',
     'log2_micro',
     'log10_micro',
+    'mul16_sqrom',
     'ctrl_mul32',
     'ctrl_mul32acc',
-    'MUL32ACC_U',
     'FWD_MAP',
     'INV_MAP',
     'GF4_POLY',
@@ -119,6 +117,37 @@ def gray_to_bin(gray_val):
     for shift in [1, 2, 4, 8, 16]:
         x = gray_to_bin_step(x, shift)
     return x
+def mul16_sqrom(a, b):
+    """16x16 unsigned via 4x SQROM8 (Quadrat-ROM) + Schulbuch-Komposition.
+    SQROM8 maskiert s1/s2 intern auf 8 bit -> low/cross-Quadranten ohne
+    Extraktion; ah/bh via permb-LSR8-Escape-Vektor [1,2,3,4] (concat=in_b||in_a).
+    11 Passes: 2x LSR8 + 4x SQROM8 + 1x ADD (cross) + LSL16/LSL8 + 2x ADD.
+    Komposition p_hi<<16 + cross<<8 + p_lo: LSL16-Vektor [0,1,4,5],
+    LSL8-Vektor [0,4,5,6] (concat=in_b||in_a: in_b=0 obere, in_a=Wert untere).
+    Q115 (pipeline_smt.py M20) beweist die SQROM8-Formel; die 16x16-Komposition
+    ist z3-QF_BV-unbeweisbar (Q116 --stretch, Distributiv-Grenze) ->
+    TEST 47 + Fuzzer-Konkret. 8x8-Referenz-Variante: SQROM8-Mode direkt."""
+    def _run(ctrl, ia, ib, ic, pv=0):
+        return execute_pipeline(ia, ib, ic, ctrl, pv, 0)['res']
+    ctrl_lsr = {'permb': dict(_b_perm, prev_in_strobe=0), 'bitfrob': dict(_b_bitf),
+                'ternlog': dict(_b_tern), 'arith4': dict(_b_arit)}
+    ah = _run(ctrl_lsr, 0, a, 0x04030201)  # a>>8
+    bh = _run(ctrl_lsr, 0, b, 0x04030201)  # b>>8
+    ctrl_sq = {'permb': dict(_b_perm), 'bitfrob': dict(_b_bitf), 'ternlog': dict(_b_tern),
+               'arith4': dict(_b_arit, mode_imm6=ArithMode.SQROM8, prev_in_strobe=0)}
+    p_hi = _run(ctrl_sq, ah, bh, 0)  # ah*bh
+    p_lo = _run(ctrl_sq, a, b, 0)    # al*bl (intern maskiert)
+    c1 = _run(ctrl_sq, ah, b, 0)     # ah*bl
+    c2 = _run(ctrl_sq, a, bh, 0)     # al*bh
+    ctrl_add = {'permb': dict(_b_perm), 'bitfrob': dict(_b_bitf), 'ternlog': dict(_b_tern),
+                'arith4': dict(_b_arit, mode_imm6=ArithMode.ADD, prev_in_strobe=0)}
+    cross = _run(ctrl_add, c1, c2, 0)  # <= 130050, kein Overflow
+    ctrl_lsl = {'permb': dict(_b_perm, prev_in_strobe=0), 'bitfrob': dict(_b_bitf),
+                'ternlog': dict(_b_tern), 'arith4': dict(_b_arit)}
+    hi_s = _run(ctrl_lsl, p_hi, 0, 0x05040100)   # p_hi<<16
+    cr_s = _run(ctrl_lsl, cross, 0, 0x06050400)  # cross<<8
+    tmp = _run(ctrl_add, hi_s, cr_s, 0)
+    return _run(ctrl_add, tmp, p_lo, 0)
 def ctz_mul_step(a, b, res, step_count):
     """Eine Loop-Iteration: ctz(b) verschobene a+b, einmal add, shift.
     Returns (new_a, new_b, new_res, step_count+1).
@@ -486,13 +515,13 @@ ctrl_subb_lo = {
     'permb':   _b_perm.copy(),
     'bitfrob': _b_bitf.copy(),
     'ternlog': _b_tern.copy(),
-    'arith4':  {'mode_imm6': ArithMode.SUBB, 'inv_1': False, 'inv_2': False, 'inv_3': False, 'prev_in_strobe': 0, 'src3_idx': 0, 'cst_table': False, 'write_flags': True, 'read_flags': False, 'internal_table': False, 'op_type_1': OpType.SCALAR, 'op_type_2': OpType.SCALAR, 'op_type_3': OpType.SCALAR},
+    'arith4':  {'mode_imm6': ArithMode.ADDC, 'inv_1': False, 'inv_2': True, 'inv_3': False, 'prev_in_strobe': 0, 'src3_idx': 0, 'cst_table': False, 'write_flags': True, 'read_flags': False, 'internal_table': False, 'op_type_1': OpType.SCALAR, 'op_type_2': OpType.SCALAR, 'op_type_3': OpType.SCALAR},
 }
 ctrl_subb_hi = {
     'permb':   _b_perm.copy(),
     'bitfrob': _b_bitf.copy(),
     'ternlog': _b_tern.copy(),
-    'arith4':  {'mode_imm6': ArithMode.SUBB, 'inv_1': False, 'inv_2': False, 'inv_3': False, 'prev_in_strobe': 0, 'src3_idx': 0, 'cst_table': False, 'write_flags': False, 'read_flags': False, 'internal_table': False, 'op_type_1': OpType.SCALAR, 'op_type_2': OpType.SCALAR, 'op_type_3': OpType.SCALAR},
+    'arith4':  {'mode_imm6': ArithMode.ADDC, 'inv_1': False, 'inv_2': True, 'inv_3': False, 'prev_in_strobe': 0, 'src3_idx': 0, 'cst_table': False, 'write_flags': False, 'read_flags': False, 'internal_table': False, 'op_type_1': OpType.SCALAR, 'op_type_2': OpType.SCALAR, 'op_type_3': OpType.SCALAR},
 }
 ctrl_mul = {
     'permb':   _b_perm.copy(),
@@ -557,13 +586,11 @@ def mul32_hw(a, b):
 def mulhi_hw(a, b):
     r = arith4(a, b, 0, ArithMode.MULHI, 0)
     return r['res']
-MUL32_U = ArithMode.MUL32 | 0x20  # bit5=1=unsigned
-MULHI_U = ArithMode.MULHI | 0x20
 def mul32u_hw(a, b):
-    r = arith4(a, b, 0, MUL32_U, 0)
+    r = arith4(a, b, 0, ArithMode.MUL32, 0, unsigned=True)
     return r['res'], r['aux']
 def mulhiu_hw(a, b):
-    r = arith4(a, b, 0, MULHI_U, 0)
+    r = arith4(a, b, 0, ArithMode.MULHI, 0, unsigned=True)
     return r['res']
 def log2_micro(x):
     # Pass1: LZC
@@ -607,7 +634,6 @@ ctrl_mul32acc = {
                 'src3_idx': 0, 'cst_table': False,
                 'write_flags': False, 'read_flags': False, 'internal_table': False}
 }
-MUL32ACC_U = ArithMode.MUL32ACC | 0x20
 FWD_MAP = [0x70, 0xD2, 0xAC, 0xA0, 0x73, 0x7A, 0xF0, 0xC8]
 INV_MAP = [0x1A, 0x0B, 0x26, 0x2A, 0xA3, 0x49, 0xEB, 0x41]
 GF4_POLY = 0x13
