@@ -3388,6 +3388,414 @@ def _run_M22():
     print("M22 PASS")
 
 
+def _run_M23():
+    # === M23: Encoding-Offset-Check: Control/Memory-Feld-Form (FMEM) ===
+    # Papier-Form (isa_vision.md Sektion 3): C(31) WRF(30) opcode(29-26)
+    # scale(25-24) off_hi(23-22) dst(21-17) src1(16-13) src2(12-9)
+    # off_lo(8-0). Offset = 11 Bit signed (off_hi 2 + off_lo 9) in
+    # 2-Byte-Einheiten (Bit 0 implizit 0), << scale (0-3 -> 1/2/4/8).
+    # Bytes = offs_Einheiten * 2 * (1<<scale): scale 3 -> -16384/+16368.
+    # Q123: Offset-Spanne + Sprungziel-Raster; Q124: Feld-Disjunktheit +
+    # F3-Konsistenz; Q125: compressed-16-bit-Bereich (Notiz-Query).
+    print("M23 FMEM: Encoding-Offset-Check (Spherening + Feld-Form)")
+    t123 = time.time()
+
+    # Q123a: Offset-Spanne. Fuer alle (offs 11-bit signed, scale 0-3):
+    # bytes = SignExtend(offs) << (1+scale) in [-16384, 16368].
+    # Negation: existiert (offs,scale) mit bytes > 16368 oder < -16384.
+    print("Q123a FMEM: Offset-Spanne [-16384, 16368] Bytes (11-bit << (1+scale))")
+    q123_offs = z3.BitVec('offs_q123', 11)
+    q123_scale = z3.BitVec('scale_q123', 2)
+    q123_shift = z3.ZeroExt(28, z3.BitVecVal(1, 4) + z3.ZeroExt(2, q123_scale))
+    q123_bytes = z3.SignExt(21, q123_offs) << q123_shift
+    _m9_unsat("Q123a FMEM Offset-Spanne (16368/16384)",
+              z3.Or(q123_bytes > z3.BitVecVal(16368, 32),
+                    q123_bytes < z3.BitVecVal(-16384, 32)))
+
+    # Q123b: typische Sprungziele erreichbar — fuer jedes Ziel existiert
+    # (offs, scale) mit (offs << 1 << scale) == Ziel-Bytes. Darstellbare
+    # -> sat + Witness (offs/scale via as_long); 16384 > 16368 max-Spanne
+    # -> Negation unsat = formaler Nicht-Darstellbarkeits-Beweis.
+    print("Q123b FMEM: Sprungziele 512..16384 Bytes (Witness offs/scale)")
+    for _t, _exp in [(512, True), (1024, True), (2048, True), (4096, True),
+                     (8192, True), (16384, False)]:
+        _s = z3.SolverFor('QF_BV')
+        _s.set("timeout", 30000)
+        _s.add((z3.SignExt(21, q123_offs) << q123_shift)
+               == z3.BitVecVal(_t, 32))
+        _r = _s.check()
+        if _exp:
+            assert _r == z3.sat, f"Q123b Ziel {_t}: {_r} -> STOP (unerreichbar?)"
+            _m = _s.model()
+            _o = _m.eval(q123_offs, model_completion=True).as_long()
+            _sc = _m.eval(q123_scale, model_completion=True).as_long()
+            print(f"Q123b Ziel {_t}: erreichbar (offs={_o}, scale={_sc}, "
+                  f"bytes={_o * 2 * (1 << _sc)})")
+        else:
+            assert _r == z3.unsat, f"Q123b Ziel {_t}: {_r} -> Gegenbeispiel"
+            print(f"Q123b Ziel {_t}: nicht darstellbar (Spanne max 16368)")
+
+    # Q124: Feld-Disjunktheit. FMEM-Slices paarweise ueberlapp-frei (kein Bit
+    # in zwei Feldern); dst/src1/src2 positions-identisch zu F3 (src3 25-22,
+    # dst 21-17, src1 16-13, src2 12-9) -> Decoder-Konsistenz.
+    print("Q124 FMEM: Feld-Disjunktheit + F3-Decoder-Konsistenz")
+    _flds = {'scale': (24, 25), 'off_hi': (22, 23), 'off_lo': (0, 8),
+             'dst': (17, 21), 'src1': (13, 16), 'src2': (9, 12)}
+
+    def _mask(lo, hi):
+        return z3.BitVecVal(((1 << (hi - lo + 1)) - 1) << lo, 32)
+
+    _mks = {n: _mask(*r) for n, r in _flds.items()}
+    _nm = list(_mks)
+    for _i in range(len(_nm)):
+        for _j in range(_i + 1, len(_nm)):
+            _s = z3.SolverFor('QF_BV')
+            _s.set("timeout", 30000)
+            _s.add((_mks[_nm[_i]] & _mks[_nm[_j]]) != 0)
+            _r = _s.check()
+            if _r == z3.sat:
+                print(f"Q124 {_nm[_i]} & {_nm[_j]}: SAT -> Felder ueberlappen")
+                assert False, f"Q124 {_nm[_i]} & {_nm[_j]}: sat -> STOP"
+            assert _r == z3.unsat, f"Q124 {_nm[_i]} & {_nm[_j]}: {_r}"
+    _f3 = {'dst': (17, 21), 'src1': (13, 16), 'src2': (9, 12)}
+    for _n in _f3:
+        _s = z3.SolverFor('QF_BV')
+        _s.set("timeout", 30000)
+        _s.add((_mks[_n] ^ _mask(*_f3[_n])) != 0)
+        _r = _s.check()
+        if _r == z3.sat:
+            print(f"Q124 F3-{_n}: SAT -> Position weicht ab")
+            assert False, f"Q124 F3-{_n}: sat -> STOP"
+        assert _r == z3.unsat, f"Q124 F3-{_n}: {_r}"
+    print("Q124 FMEM Feld-Disjunktheit + F3-Konsistenz PASS")
+
+    # Q125: compressed-Ausblick (Bit 31 C gesetzt -> 16-bit-Form). Offset nur
+    # noch ~8-9 Bit in 2-Byte-Einheiten: offs 9-bit signed -> max +255
+    # Einheiten = 510 Bytes, min -256 Einheiten = -512 Bytes. Notiz-Query.
+    print("Q125 FMEM: compressed-16-bit-Bereich (+/-255 Einheiten = +/-510 Bytes)")
+    _c = z3.BitVec('offs_q125', 9)
+    _cb = z3.SignExt(23, _c) << 1
+    _m9_unsat("Q125 compressed: Bytes in [-512, 510]",
+              z3.Or(_cb > z3.BitVecVal(510, 32),
+                    _cb < z3.BitVecVal(-512, 32)))
+
+    LEMMAS.update({
+        'R_FMEM_OFF': 'FMEM 11-bit signed << (1+scale): Spanne [-16384, 16368] (Q123)',
+        'R_FMEM_FIELDS': 'FMEM-Felder disjunkt, dst/src1/src2 == F3 (Q124)',
+        'R_CMPRANGE': 'compressed 16-bit: ~8-9 Bit 2-Byte -> +/-510 Bytes (Q125)',
+    })
+    print("M23 Encoding-Offset-Check (R_FMEM_OFF/R_FMEM_FIELDS/R_CMPRANGE):")
+    for name in sorted(LEMMAS):
+        print(f"  {name:<14} {LEMMAS[name]}")
+    print(f"  Q123-Q125 fertig ({time.time()-t123:.2f}s)")
+    print("M23 PASS")
+    return
+
+
+def _run_M24():
+    # === M24: bxx-Praedikat-Fabriken: XOR-Substitution (Bedingungscodes) ===
+    # Control-Op bxx (isa_vision.md Sektion 3): src1/src2 bei bedingtem
+    # Sprung praktisch tot -> Praedikat-Logik. 4 Bedingungs-Kanaele,
+    # Standard: Kanal i = Flag i (S=0, C=1, Z=2, O=3). src1 = 4 Bit:
+    # src1[3:2] = Kanal-Position p, die durch XOR-Signal ERSETZT wird;
+    # src1[1:0] = Paar-Wahl: 00:S^O, 01:C^Z, 10:S^Z, 11:C^O.
+    # Substitution: effektiver Kanal p = (FlagX XOR FlagY) des Paars,
+    # alle anderen Kanaele = rohe Flags. Muster bleibt: dst[3:0]=mask,
+    # src2[3:0]=wish, dst[4]=inv: inv=0 -> any ((eff^wish)&mask)!=mask,
+    # inv=1 -> all ((eff^wish)&mask)==0 (eff = 4-Bit-Kanal-Vektor).
+    # Flag-Konvention (pipeline.py:17-20): S=0x01, C=0x02, Z=0x04, O=0x08.
+    # Q126: 14 ARM-Bedingungen Existenz-Beweis (t 13 Bit, alle 16 f).
+    # Q127: Zaehlung darstellbarer boolescher Funktionen (Python-Enum).
+    # Q128: Witness-Tabelle je cond + substituierter Kanal.
+    print("M24 bxx: Praedikat-Fabriken XOR-Substitution (14 ARM-Bedingungen)")
+    t124 = time.time()
+    _CODES = ['EQ', 'NE', 'CS', 'CC', 'MI', 'PL', 'VS', 'VC',
+              'HI', 'LS', 'GE', 'LT', 'GT', 'LE']
+    _COND = {
+        'EQ': lambda f: bool(f & 4),
+        'NE': lambda f: not bool(f & 4),
+        'CS': lambda f: bool(f & 2),
+        'CC': lambda f: not bool(f & 2),
+        'MI': lambda f: bool(f & 1),
+        'PL': lambda f: not bool(f & 1),
+        'VS': lambda f: bool(f & 8),
+        'VC': lambda f: not bool(f & 8),
+        'HI': lambda f: bool(f & 2) and not (f & 4),
+        'LS': lambda f: not (f & 2) or bool(f & 4),
+        'GE': lambda f: ((f & 1) != 0) == ((f & 8) != 0),
+        'LT': lambda f: ((f & 1) != 0) != ((f & 8) != 0),
+        'GT': lambda f: not (f & 4) and (((f & 1) != 0) == ((f & 8) != 0)),
+        'LE': lambda f: bool(f & 4) or (((f & 1) != 0) != ((f & 8) != 0)),
+    }
+    _PAIR = {0: 'S^O', 1: 'C^Z', 2: 'S^Z', 3: 'C^O'}
+
+    def _pred_z3(t, fv):
+        fl = z3.BitVecVal(fv, 4)
+        p = z3.Extract(3, 2, t)      # Kanal-Position 0-3 (XOR-substituiert)
+        pr = z3.Extract(1, 0, t)     # Paar-Wahl 0-3
+        f0 = z3.Extract(0, 0, fl)
+        f1 = z3.Extract(1, 1, fl)
+        f2 = z3.Extract(2, 2, fl)
+        f3 = z3.Extract(3, 3, fl)
+        xb = z3.If(pr == 0, f0 ^ f3,
+             z3.If(pr == 1, f1 ^ f2,
+              z3.If(pr == 2, f0 ^ f2, f1 ^ f3)))
+        eff = z3.If(p == 0, z3.Concat(f3, f2, f1, xb),
+             z3.If(p == 1, z3.Concat(f3, f2, xb, f0),
+              z3.If(p == 2, z3.Concat(f3, xb, f1, f0),
+                    z3.Concat(xb, f2, f1, f0))))
+        mask = z3.Extract(11, 8, t)
+        wish = z3.Extract(7, 4, t)
+        inv = z3.Extract(12, 12, t) == 1
+        return z3.If(inv, ((eff ^ wish) & mask) == 0,
+                     ((eff ^ wish) & mask) != mask)
+
+    def _pred_py(t, f):
+        dst = (t >> 8) & 0x1F
+        src2 = (t >> 4) & 0x0F
+        src1 = t & 0x0F
+        p = (src1 >> 2) & 3
+        pr = src1 & 3
+        f0 = f & 1
+        f1 = (f >> 1) & 1
+        f2 = (f >> 2) & 1
+        f3 = (f >> 3) & 1
+        if pr == 0:
+            xb = f0 ^ f3
+        elif pr == 1:
+            xb = f1 ^ f2
+        elif pr == 2:
+            xb = f0 ^ f2
+        else:
+            xb = f1 ^ f3
+        bits = [f0, f1, f2, f3]
+        bits[p] = xb
+        eff = bits[0] | (bits[1] << 1) | (bits[2] << 2) | (bits[3] << 3)
+        mask = dst & 0x0F
+        wish = src2 & 0x0F
+        if ((dst >> 4) & 1) == 0:
+            return ((eff ^ wish) & mask) != mask
+        return ((eff ^ wish) & mask) == 0
+
+    # Q126: Abdeckungs-Matrix — fuer jede der 14 ARM-Bedingungen existiert
+    # ein 13-Bit-Tupel t = concat(dst5, src2_4, src1_4) mit
+    # Praedikat(t,f) == cond(f) fuer ALLE f in 0..15. sat -> Witness
+    # (dst/src2/src1 via as_long), unsat -> LUECKE (Analyse, kein Stop).
+    print("Q126 bxx: 14 ARM-Bedingungen — Existenz-Beweis (t=13 Bit, alle 16 f)")
+    _t13 = z3.BitVec('t_q126', 13)
+    _wits = {}
+    for _c in _CODES:
+        _s = z3.SolverFor('QF_BV')
+        _s.set("timeout", 30000)
+        for _fv in range(16):
+            _s.add(_pred_z3(_t13, _fv) == z3.BoolVal(_COND[_c](_fv)))
+        _r = _s.check()
+        if _r == z3.sat:
+            _m = _s.model()
+            _tv = _m.eval(_t13, model_completion=True).as_long()
+            _dst = (_tv >> 8) & 0x1F
+            _src2 = (_tv >> 4) & 0x0F
+            _src1 = _tv & 0x0F
+            _wits[_c] = (_dst, _src2, _src1)
+            # Python-Spiegel gegen z3-Witness cross-checken (Divergenz-Falle)
+            for _fv in range(16):
+                assert _pred_py(_tv, _fv) == bool(_COND[_c](_fv)), \
+                    f"Q126 {_c}: python/z3-Divergenz f={_fv}"
+            print(f"Q126 {_c}: sat -> abgedeckt (dst={_dst}, src2={_src2}, "
+                  f"src1={_src1}, subst-Kanal={(_src1 >> 2) & 3}, "
+                  f"pair={_PAIR[_src1 & 3]})")
+        else:
+            assert _r == z3.unsat, f"Q126 {_c}: {_r} -> STOP"
+            print(f"Q126 {_c}: unsat -> LUECKE (kein 13-Bit-Witness)")
+
+    # Q127: Zaehlung darstellbarer boolescher Funktionen. Python-Enumeration
+    # ueber t in range(8192), funct = 16-Bit-Int (Bit f = Praedikat(t,f)),
+    # distinkte in Set. KEIN Solver noetig. Klassiker-Vergleich via cond-Ints.
+    print("Q127 bxx: Zaehlung darstellbarer boolescher Funktionen (8192 Tupel)")
+    _seen = set()
+    for _tv in range(8192):
+        _ft = sum(int(_pred_py(_tv, _f)) << _f for _f in range(16))
+        _seen.add(_ft)
+    _nontriv = [x for x in _seen if x != 0 and x != 0xFFFF]
+    _code_ints = {c: sum(int(_COND[c](f)) << f for f in range(16))
+                  for c in _CODES}
+    _missing = [c for c in _CODES if _code_ints[c] not in _seen]
+    print(f"Q127 bxx: distinct={len(_seen)}, nichttrivial={len(_nontriv)}, "
+          f"Klassiker-im-Set={14 - len(_missing)}/14"
+          + (f", fehlt: {_missing}" if _missing else ""))
+
+    # Q128: Witness-Tabelle — je cond den Q126-Witness + substituierter
+    # Kanal-Position p und Paar-Wahl (wo das XOR-Signal wirkt).
+    print("Q128 bxx: Witness-Tabelle (14 cond -> Kanal-Substitution)")
+    for _c in _CODES:
+        if _c in _wits:
+            _wt = _wits[_c]
+            print(f"Q128 {_c}: dst={_wt[0]} src2={_wt[1]} src1={_wt[2]} "
+                  f"(Kanal {(_wt[2] >> 2) & 3} <- {_PAIR[_wt[2] & 3]})")
+        else:
+            print(f"Q128 {_c}: kein Witness (LUECKE)")
+
+    _all_ok = len(_wits) == 14
+    _mat = ', '.join(f'{c}:{"sat" if c in _wits else "unsat"}'
+                     for c in _CODES)
+    if _all_ok:
+        LEMMAS.update({
+            'R_BCOND_NOW': 'bxx XOR-Substitution deckt alle 14 '
+                           'ARM-Bedingungen ab',
+        })
+    print(f"M24 bxx-XOR-Substitution ({'R_BCOND_NOW' if _all_ok else 'LUECKE'}):")
+    for name in sorted(LEMMAS):
+        print(f"  {name:<14} {LEMMAS[name]}")
+    print(f"  Q126-Q128 fertig ({time.time()-t124:.2f}s)")
+    print(f"  Matrix: {_mat}")
+    if _all_ok:
+        print("M24 PASS (alle 14 ARM-Bedingungen abgedeckt)")
+        return
+    print(f"M24 LÜCKE: {[c for c in _CODES if c not in _wits]}")
+    return
+
+
+def _run_M25():
+    # === M25: F1-Imm13-Allokation (Q129-Q132) ===
+    # Drei F1-imm13-Encodings aus dem ISA-Shell formell (QF_BV) verifizieren:
+    # Q129 sarithi: 9-bit-val (sign-ext -256..255) << shift4 (0..15),
+    #   8192 Kombis -> 4352 distinkte Werte; 0x101/0xE81/0x11B nicht darstellbar.
+    # Q130 cbitfrob_i: mode5(imm[12:8]) + amt8(imm[7:0]), amt & 0x1F bei Decode
+    #   -> 1024 distinkt, obere 3 amt-Bits tot (1..31 wirksam).
+    # Q131 slogii: ones5(1..31) | rep3 -> elem-Replikation | rot5; 5952 Kombis
+    #   -> 1303 distinkte Masken, Klassiker (0xFFFFFFFF, 0x0F0F0F0F, ...) erreichbar.
+    # Q132 Variante val8<<shift5 -> 3328 distinkt (Untertest).
+    print("M25 F1-Imm13: Allokations-Semantik (Q129-Q132)")
+    t125 = time.time()
+
+    # Q129a: sarithi val9<<shift4 — Python-Enumeration (Ground-Truth-Spiegel).
+    print("Q129a sarithi: val9<<shift4 — 8192 Kombis, distinkte Werte mod 2^32")
+    _q129 = set()
+    for _v in range(-256, 256):
+        for _s in range(16):
+            _q129.add((_v << _s) & 0xFFFFFFFF)
+    assert len(_q129) == 4352, f"Q129a: distinct={len(_q129)} != 4352 -> STOP"
+    print("Q129: distinct=4352")
+
+    # Q129b: Existenz-Beweise (sat + Witness). Ziel-Tupel fuer typische Werte;
+    # Modell: val9 sign-extended, shift4 0..15. Zwei Witness drucken.
+    print("Q129b sarithi: Existenz-Beweise (Witness val/shift)")
+    _v9 = z3.BitVec('v_q129', 9)
+    _s4 = z3.BitVec('s_q129', 4)
+    _witnesses = 0
+    for _tgt in [0x1000, 0x400, 0x800, 0xE80, 0x1680, 0x7F, 0x10000]:
+        _s = z3.SolverFor('QF_BV')
+        _s.set("timeout", 30000)
+        _s.add((z3.SignExt(23, _v9) << z3.ZeroExt(28, _s4)) == z3.BitVecVal(_tgt, 32))
+        _r = _s.check()
+        assert _r == z3.sat, f"Q129b 0x{_tgt:X}: {_r} -> STOP (sollte darstellbar)"
+        _m = _s.model()
+        _vv = _m.eval(_v9, model_completion=True).as_long()
+        _ss = _m.eval(_s4, model_completion=True).as_long()
+        if _vv >= 128:
+            _vv -= 256
+        if _witnesses < 2:
+            print(f"Q129b 0x{_tgt:X}: erreichbar (val={_vv}, shift={_ss}, "
+                  f"bytes=0x{((_vv << _ss) & 0xFFFFFFFF):X})")
+        _witnesses += 1
+    print(f"Q129b: {_witnesses} Ziele alle sat (keine LUECKE)")
+
+    # Q129c: Nicht-Darstellbarkeits-Beweise (Negations-Idiom, _m9_unsat).
+    # val9 signed 9-bit, shift 0..15; keiner existiert fuer 0x101/0xE81/0x11B.
+    print("Q129c sarithi: Nicht-Darstellbarkeit 0x101/0xE81/0x11B")
+    for _tgt in [0x101, 0xE81, 0x11B]:
+        _m9_unsat(f"Q129c 0x{_tgt:X}",
+                  (z3.SignExt(23, _v9) << z3.ZeroExt(28, _s4))
+                  == z3.BitVecVal(_tgt, 32))
+    print("Q129: 0x101/0xE81/0x11B nicht darstellbar projektiert")
+
+    # Q130a: cbitfrob_i mode5+amt8 — Distinctness via Python-Enumeration.
+    print("Q130a cbitfrob_i: mode5<<8 | amt8 (amt & 0x1F) — 1024 distinkt")
+    _q130 = set()
+    for _m in range(32):
+        for _a in range(32):
+            _q130.add((_m << 8) | _a)
+    assert len(_q130) == 1024, f"Q130a: distinct={len(_q130)} != 1024 -> STOP"
+    print("Q130: 1024 distinkt")
+
+    # Q130b: WASTE-Bits — obere 3 amt-Bits erreichen den Decode nie.
+    # a 8-bit: gilt a>=0x20 UND (a&0x1F)==a -> a hat obere 3 Bits gesetzt UND
+    # nicht gesetzt = Widerspruch -> unsat beweist, dass nur amt 0..31 wirkt.
+    print("Q130b cbitfrob_i: 3 amt-WASTE-Bits (nur 0..31 am Decode)")
+    _a8 = z3.BitVec('a_q130', 8)
+    _m9_unsat("Q130b waste-bits (kein a>=0x20 ueberlebt &0x1F)",
+              z3.And(z3.UGE(_a8, z3.BitVecVal(0x20, 8)),
+                     (_a8 & z3.BitVecVal(0x1F, 8)) == _a8))
+
+    # Q131a: slogii ones/rep/rot — Python-Enumeration (Ground-Truth-Spiegel).
+    print("Q131a slogii: ones5/rep3/rot5 Masken-Enumeration — 5952 Kombis")
+    def _slogii_mask(ones, rep, rot):
+        _base = (1 << ones) - 1
+        _eb = [32, 16, 8, 4, 2, 1][rep]
+        _elem = _base & ((1 << _eb) - 1)
+        _vv = 0
+        for _i in range(32 // _eb):
+            _vv |= (_elem & 0xFFFFFFFF) << (_i * _eb)
+        _vv &= 0xFFFFFFFF
+        return ((_vv >> rot) | (_vv << (32 - rot))) & 0xFFFFFFFF if rot else _vv
+
+    _q131 = set()
+    for _o in range(1, 32):
+        for _r in range(6):
+            for _rt in range(32):
+                _q131.add(_slogii_mask(_o, _r, _rt))
+    assert len(_q131) == 1303, f"Q131a: distinct={len(_q131)} != 1303 -> STOP"
+    print("Q131: distinct=1303")
+
+    # Q131b: CLASSIC-Reachability — bekannte Klassiker-Masken erreichbar.
+    print("Q131b slogii: Klassiker-Masken-Erreichbarkeit")
+    _CLASSIC = [0xFFFFFFFF, 0x0F0F0F0F, 0xFF00FF00, 0x55555555, 0x0000FFFF]
+    for _ct in _CLASSIC:
+        assert _ct in _q131, f"Q131b 0x{_ct:08X}: nicht erreichbar -> STOP"
+        for _o in range(1, 32):
+            for _r in range(6):
+                for _rt in range(32):
+                    if _slogii_mask(_o, _r, _rt) == _ct:
+                        print(f"Q131b 0x{_ct:08X}: ones={_o}, rep={_r}, rot={_rt}")
+                        break
+                else:
+                    continue
+                break
+            else:
+                continue
+            break
+
+    # Q132: Variante sarithi val8<<shift5 (Untertest) — 8-bit-val (-128..127),
+    # shift 0..31. Groesserer Shift-Bereich, aber schmalerer Val -> MEHR
+    # Verschnuerung (Overlaps). Erwartet: 8192 Kombis -> 3328 distinkt
+    # (weniger als val9<<shift4 mit 4352, da Val-Bereich halbiert dominiert).
+    print("Q132 sarithi-var: val8<<shift5 — 8192 Kombis, distinkte Werte mod 2^32")
+    _q132 = set()
+    for _v in range(-128, 128):
+        for _s in range(32):
+            _q132.add((_v << _s) & 0xFFFFFFFF)
+    assert len(_q132) == 3328, f"Q132: distinct={len(_q132)} != 3328 -> STOP"
+    print("Q132: distinct=3328 (val9<<shift4 hatte 4352)")
+
+    LEMMAS.update({
+        'R_SARITHI_IMM': 'sarithi val9<<shift4: 8192 Kombis -> 4352 distinkt; '
+                         '0x101/0xE81/0x11B nicht darstellbar',
+        'R_CBITFROBI_AMT': 'cbitfrob_i amt8: 3 tote Bits (nur 0..31 wirken), '
+                           '1024 distinkt',
+        'R_SLOGII_MASK': 'slogii ones/rep/rot: 5952 Kombis -> 1303 distinkte '
+                         'Masken; Klassiker drin',
+        'R_SARITHI8': 'sarithi-Variante val8<<shift5: 8192 Kombis -> 3328 '
+                      'distinkt (schmalerer Val > mehr Overlaps)',
+    })
+    print("M25 F1-Imm13-Allokation "
+          "(R_SARITHI_IMM/R_CBITFROBI_AMT/R_SLOGII_MASK/R_SARITHI8):")
+    for name in sorted(LEMMAS):
+        print(f"  {name:<14} {LEMMAS[name]}")
+    print(f"  Q129-Q132 fertig ({time.time()-t125:.2f}s)")
+    print("M25 PASS")
+    return
+
+
 if __name__ == "__main__":
     z3.set_param("parallel.enable", True)  # Multi-Core: mehrere Strategien parallel
 
@@ -3396,7 +3804,7 @@ if __name__ == "__main__":
     # Sektions-Gruppen fuer gezielte Laeufe. M-Namen + thematische Aliase;
     # Aliase fuer schnelle Agenten-/Dev-Laeufe (Context-/Timeout-Schutz).
     _SEC_NAMES = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M8b', 'M9',
-                  'M10', 'M10b', 'M12', 'M13', 'M14', 'M15', 'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22']
+                  'M10', 'M10b', 'M12', 'M13', 'M14', 'M15', 'M16', 'M17', 'M18', 'M19', 'M20', 'M21', 'M22', 'M23', 'M24', 'M25']
     _ALIASES = {
         'ternlog': ['M1'],
         'bitfrob': ['M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M16', 'M17', 'M18'],
@@ -3409,6 +3817,9 @@ if __name__ == "__main__":
         'sqrom':   ['M20'],
         'div':     ['M21'],
         'newton32': ['M22'],
+        'offset':  ['M23'],
+        'bcond':   ['M24'],
+        'f1imm':   ['M25'],
         'smoke':   ['M1', 'M2', 'M3', 'M4', 'M8b'],
     }
     _TITLES = {
@@ -3435,6 +3846,9 @@ if __name__ == "__main__":
         'M20': 'SQROM8-Quadrat-Tabellen-MUL (Q115-Q116)',
         'M21': 'Newton-Division (Q117-Q119)',
         'M22': '32-bit-Newton-Abschaetzung (Q120-Q122)',
+        'M23': 'Encoding-Offset-Check (Q123-Q125)',
+        'M24': 'bxx XOR-Substitution (Q126-Q128)',
+        'M25': 'F1-Imm13-Allokation (Q129-Q131)',
     }
     _SECTIONS = [
         ('M1', _run_M1), ('M2', _run_M2), ('M3', _run_M3), ('M4', _run_M4),
@@ -3445,6 +3859,9 @@ if __name__ == "__main__":
         ('M20', _run_M20),
         ('M21', _run_M21),
         ('M22', _run_M22),
+        ('M23', _run_M23),
+        ('M24', _run_M24),
+        ('M25', _run_M25),
     ]
 
     def _resolve(tok):

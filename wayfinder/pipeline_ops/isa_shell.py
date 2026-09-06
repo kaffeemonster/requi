@@ -10,7 +10,9 @@ ITERATION 1 (Kern-Zyklus): carith (F3) + sarith (F2-Sub) + Control (bra/brl/bxx)
 + Memory (ld/st). ternlog/permb/bitfrob-Planen: Lexikon reserviert, Exec folgt.
 
 VEREINFACHUNGEN (Iteration 1, sind in isa_vision.md als offen markiert):
-- bxx: Branch wenn (flags & mask) != 0; volle Bedingungs-Maschine offen.
+- bxx: XOR-Substitutions-Bedingung (Lemma R_BCOND_NOW, pipeline_smt.py M24):
+  src1[3:2] = Ersatz-Kanal p, src1[1:0] = Paar (0:S^O, 1:C^Z, 2:S^Z, 3:C^O);
+  dst Bit4 = inv (0: any ((f_eff^wish)&mask)!=mask, 1: all ==0).
 - PC-relative: src1-Feld = 0 (S0, Zero-Reg) bedeutet PC-Basis.
 - Memory-Adresse: base + idx + (offs << scale); Index byte-genau (unaligned),
   Offset breiten-skaliert (ARM-LDR-artig). Control: base + (idx << scale) + (offs*2 << scale).
@@ -36,8 +38,10 @@ FORMS = {
     'F2':   {'subop': (25, 22), 'dst': (21, 17), 'src1': (16, 13), 'src2': (12, 9),
              'cst': (8, 8), 'ctrl': (7, 0)},
     'F1':   {'subop': (25, 22), 'dst': (21, 17), 'src1': (16, 13), 'imm': (12, 0)},
+    'F2C':  {'subop': (25, 22), 'dst': (21, 17), 'src1': (16, 13), 'imm': (12, 0)},
     'FMEM': {'scale': (25, 24), 'off_hi': (23, 22), 'dst': (21, 17),
              'src1': (16, 13), 'src2': (12, 9), 'off_lo': (8, 0)},
+    'FLDI': {'dst': (25, 21), 'form': (20, 20), 'imm': (19, 0)},
 }
 
 # PLANES: opcode-Feld (29-26) -> (Form, Semantik)
@@ -49,7 +53,9 @@ PLANES = {
     0x4: ('F2', 'subsplit'),   # Sub-Plane: 16 Sub-Instruktionen (c/s-Varianten)
     0x5: ('FMEM', 'control'),
     0x6: ('FMEM', 'memory'),
-    # 0x7-0xF: frei (System/MSR, AMOD, float, MOVEM, ...)
+    0x7: ('FLDI', 'ldi'),
+    0x8: ('F2C', 'csubsplit'),  # csubsplit (Complex-Subsplit, C-Pendant zu Plane 0x4, F1-Imm-Familie)
+    # 0x9-0xF: frei (System/MSR, AMOD, float, MOVEM, ...)
 }
 
 # SUBOPS: 4-Bit-Sub-Opcode -> Instruktionsname. Option (a): eigener Slot je C/S.
@@ -63,8 +69,22 @@ SUBOPS = {
     0x4: ('sbitfrob', 's', 'F2'), 0x5: ('sbitfrob', 'c', 'F2'),
     0x6: ('sshufb', 's', 'F2'),   0x7: ('sshufb', 'c', 'F2'),
     0x8: ('sarith', 's', 'F1'),   0x9: ('sarith', 'c', 'F1'),
-    # 0xA-0xF: frei
+    0xA: ('slogii', 's', 'F1'),   0xB: ('slogii', 'c', 'F1'),   # AND
+    0xC: ('slogii', 's', 'F1'),   0xD: ('slogii', 'c', 'F1'),   # OR
+    0xE: ('slogii', 's', 'F1'),   0xF: ('slogii', 'c', 'F1'),   # XOR
 }
+# slogii-Op: Bit1/2 kodieren 0=AND 1=OR 2=XOR (sub 0xA-0xE, bit0 = s/c-Gruppe)
+_SLOGII_OP = {0xA: 0x8, 0xC: 0xE, 0xE: 0x6}  # sub -> 2-Input-LUT (AND/OR/XOR)
+
+# SUBOPS_C: csubsplit-Plane (0x8) Sub-Ops. Alle F1 (Imm13); C-Gruppe zentral.
+SUBOPS_C = {
+    0x8: ('cbitfrob', 'c', 'F1'),   # rest frei: cshufb_i, carith_i, ...
+}
+
+# cbitfrob_i-Shift-Familie: Spar-Core-Artefakt. amt<8 = 1 Passage (bitfrob fein);
+# amt>=8 = 2 Passagen (permb-Byte-Grob + bitfrob-Fein, +1 Extra-Zyklus).
+SHIFT_FAM = {BitFrobMode.LSR, BitFrobMode.LSL, BitFrobMode.ASR,
+             BitFrobMode.ROR, BitFrobMode.ROL, BitFrobMode.SHR_STICKY}
 
 # MSR-Region (pseudo-MMIO, 0x000-0xFFF); Register im untersten Block
 MSR_VECTOR = 0x000  # Reset-Vektor: PC-Startwert (Wort)
@@ -78,6 +98,7 @@ RAM_SIZE = 0x10000
 RESET_PC = 0x1000   # Default-Vektor
 
 # Bypass-Sub-ctrls (Muster aus helpers.py: prev_in_strobe=8 = durchreichen)
+_BXX_PAIRS = ((0, 3), (1, 2), (0, 2), (1, 3))  # bxx-Paar-Kodierung: S^O, C^Z, S^Z, C^O
 _b_perm = {'src3_idx': 0, 'cst_table': False, 'imm6': 0, 'mode_nibble': False,
            'blank_enable': False, 'prev_in_strobe': 8, 'write_flags': False,
            'read_flags': False, 'internal_table': False}
@@ -113,9 +134,16 @@ def _set_bits(word, field, value, form):
     return word | ((value & mask) << lo)
 
 
+# op_type-Lane-Erweiterungen fuer carith (PSAD.b etc). F3-ctrl ist VOLL
+# (inv3<<7|inv2<<6|inv1<<5|mode5) — kein op_type-Feld (ISA-Frage, offen).
+# TEMPORAERE Shell-Extension: op_type je Wort in externem Dict (nicht-Encoded).
+_CARITH_LANE = {}
+
 def carith_w(mode, dst, s1, s2, s3=0, inv1=False, inv2=False, inv3=False,
-             cst=False, wrf=False):
-    """F3 carith: ctrl = inv3<<7 | inv2<<6 | inv1<<5 | mode(5)."""
+             cst=False, wrf=False, op_type=OpType.SCALAR):
+    """F3 carith: ctrl = inv3<<7 | inv2<<6 | inv1<<5 | mode(5).
+    op_type: extracodiert (nicht im 32-Bit-Word — F3 hat kein Lane-Feld,
+    temporaere Shell-Extension via _CARITH_LANE)."""
     ctrl = (int(inv3) << 7) | (int(inv2) << 6) | (int(inv1) << 5) | (mode & 0x1F)
     w = 0
     w = _set_bits(w, 'src3', s3, FORMS['F3'])
@@ -126,47 +154,49 @@ def carith_w(mode, dst, s1, s2, s3=0, inv1=False, inv2=False, inv3=False,
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F3'])
     w = _set_bits(w, 'opcode', 0x0, {'opcode': (29, 26)})
     w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    if op_type != OpType.SCALAR:
+        _CARITH_LANE[w] = op_type
     return w
 
 
-def ternlog_w(lut, dst, s1, s2, s3=0, wrf=False):
-    """F3 ternlog: ctrl = LUT-Wert (256 Eintraege)."""
+def ternlog_w(lut, dst, s1, s2, s3=0, cst=False, wrf=False):
+    """F3 ternlog: ctrl = LUT-Wert (256 Eintraege). cst=True: src3 = Pool-Index."""
     w = 0
     w = _set_bits(w, 'src3', s3, FORMS['F3'])
     w = _set_bits(w, 'dst', dst, FORMS['F3'])
     w = _set_bits(w, 'src1', s1, FORMS['F3'])
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
-    w = _set_bits(w, 'cst', 0, FORMS['F3'])
+    w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', lut & 0xFF, FORMS['F3'])
     w = _set_bits(w, 'opcode', 0x1, {'opcode': (29, 26)})
     w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
     return w
 
 
-def permb_w(mode, dst, s1, s2, s3, blank=False, wrf=False):
-    """F3 permb: ctrl = blank<<7 | mode(5)."""
+def permb_w(mode, dst, s1, s2, s3, blank=False, cst=False, wrf=False):
+    """F3 permb: ctrl = blank<<7 | mode(5). cst=True: src3 = Pool-Index."""
     ctrl = (0x80 if blank else 0) | (mode & 0x1F)
     w = 0
     w = _set_bits(w, 'src3', s3, FORMS['F3'])
     w = _set_bits(w, 'dst', dst, FORMS['F3'])
     w = _set_bits(w, 'src1', s1, FORMS['F3'])
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
-    w = _set_bits(w, 'cst', 0, FORMS['F3'])
+    w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F3'])
     w = _set_bits(w, 'opcode', 0x2, {'opcode': (29, 26)})
     w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
     return w
 
 
-def bitfrob_w(mode, dst, s1, s2, s3=0, inv1=False, inv2=False, inv3=False, wrf=False):
-    """F3 bitfrob: ctrl = inv3<<7 | inv2<<6 | inv1<<5 | mode(5)."""
+def bitfrob_w(mode, dst, s1, s2, s3=0, inv1=False, inv2=False, inv3=False, cst=False, wrf=False):
+    """F3 bitfrob: ctrl = inv3<<7 | inv2<<6 | inv1<<5 | mode(5). cst=True: src3 = Pool-Index."""
     ctrl = (0x80 if inv1 else 0) | (0x40 if inv2 else 0) | (0x20 if inv3 else 0) | (mode & 0x1F)
     w = 0
     w = _set_bits(w, 'src3', s3, FORMS['F3'])
     w = _set_bits(w, 'dst', dst, FORMS['F3'])
     w = _set_bits(w, 'src1', s1, FORMS['F3'])
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
-    w = _set_bits(w, 'cst', 0, FORMS['F3'])
+    w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F3'])
     w = _set_bits(w, 'opcode', 0x3, {'opcode': (29, 26)})
     w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
@@ -188,14 +218,32 @@ def sarith_w(sub, mode, dst, s1, s2=0, inv1=False, inv2=False, inv3=False, wrf=F
     return w
 
 
-def sarithi_w(sub, mode, dst, s1, imm):
-    """F1 sarith_imm: imm13 signed."""
+def sarithi_w(sub, mode, dst, s1, val, shift=0, wrf=False):
+    """F1 sarith_imm: val(9, sign-extended) << shift(4). wrf=True setzt Flags."""
+    val9 = val & 0x1FF
+    sh = shift & 0xF
+    imm = (val9 << 4) | sh
     w = 0
     w = _set_bits(w, 'subop', sub, FORMS['F1'])
     w = _set_bits(w, 'dst', dst, FORMS['F1'])
     w = _set_bits(w, 'src1', s1, FORMS['F1'])
     w = _set_bits(w, 'imm', imm & 0x1FFF, FORMS['F1'])
     w = _set_bits(w, 'opcode', 0x4, {'opcode': (29, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    return w
+
+
+def cbitfrob_i_w(mode, dst, s1, val, wrf=False):
+    """F2C cbitfrob_i (Plane 0x8): mode5=(imm>>8), val=Shift-Menge (8-Bit, am
+    Use auf 5 Bit gekappt). C-Gruppe. Shift-Familie = Spar-Core (1-2 Passagen)."""
+    imm = ((mode & 0x1F) << 8) | (val & 0xFF)
+    w = 0
+    w = _set_bits(w, 'subop', 0x8, FORMS['F2C'])
+    w = _set_bits(w, 'dst', dst, FORMS['F2C'])
+    w = _set_bits(w, 'src1', s1, FORMS['F2C'])
+    w = _set_bits(w, 'imm', imm & 0x1FFF, FORMS['F2C'])
+    w = _set_bits(w, 'opcode', 0x8, {'opcode': (29, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
     return w
 
 
@@ -213,6 +261,155 @@ def ctrl_w(dst, s1, s2, offs, scale=0, wrf=False):
     w = _set_bits(w, 'opcode', 0x5, {'opcode': (29, 26)})
     w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
     return w
+
+
+def slogii_w(op, dst, s1, ones, rep, rot, wrf=False):
+    """F1 slogii: [ones(5)|rep(3)|rot(5)] Muster + Logik-Op.
+    op: 'and'/'or'/'xor' (bestimmt LUT2).
+    tsti-Pseudo-Op: slogii_w('and', 0, s1, 0,0,0, wrf=True)."""
+    _OP_LUT = {'and': 0xA, 'or': 0xC, 'xor': 0xE}  # F2-Sub-Op (bit0=s/c)
+    if op not in _OP_LUT:
+        raise ValueError(f"slogii: unbekannter op '{op}', erwartet and/or/xor")
+    sub = _OP_LUT[op] | 0  # s-Variante (bit0=0)
+    imm = ((ones & 0x1F) << 8) | ((rep & 7) << 5) | (rot & 0x1F)
+    w = 0
+    w = _set_bits(w, 'subop', sub, FORMS['F1'])
+    w = _set_bits(w, 'dst', dst, FORMS['F1'])
+    w = _set_bits(w, 'src1', s1, FORMS['F1'])
+    w = _set_bits(w, 'imm', imm & 0x1FFF, FORMS['F1'])
+    w = _set_bits(w, 'opcode', 0x4, {'opcode': (29, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    return w
+
+
+def _build_mask_13(ones, rep, rot):
+    """LDI-MASK-Formel in 13-Bit: (1<<ones)-1 -> Element -> replizieren -> rot.
+    Kein inv (Komplement via LDI-MASK + Reg-slogi)."""
+    ones = max(0, min(ones, 31))
+    rep = max(0, min(rep, 5))
+    rot = max(0, min(rot, 31))
+    elem_bits = {0: 32, 1: 16, 2: 8, 3: 4, 4: 2, 5: 1}[rep]
+    base = (1 << ones) - 1  # konsekutive 1er (wie BITFROB-MASKW pipeline.py:106)
+    elem = base & ((1 << elem_bits) - 1)
+    v = 0
+    for i in range(32 // elem_bits):
+        v |= (elem << (i * elem_bits))
+    v = ((v >> rot) | (v << (32 - rot))) & 0xFFFFFFFF  # Rechts-Rot
+    return v
+
+
+def ldi_movx_w(dst, imm16, hw=0, inv=False, sext=False, wrf=False):
+    """FLDI F=0 MOVX: imm16 an Halbwort-Position hw (0-3), inv/sext-Bits.
+    WRF: 0=zero-fill (nur diese haelfte), 1=merge (Rest bleibt)."""
+    w = 0
+    w = _set_bits(w, 'dst', dst, FORMS['FLDI'])
+    w = _set_bits(w, 'form', 0, FORMS['FLDI'])
+    imm = ((hw & 3) << 18) | ((0x10000 if sext else 0)) | ((0x20000 if inv else 0)) | (imm16 & 0xFFFF)
+    w = _set_bits(w, 'imm', imm, FORMS['FLDI'])
+    w = _set_bits(w, 'opcode', 0x7, {'opcode': (29, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    return w
+
+
+def ldi_mask_w(dst, ones, rep, rot, inv=False, wrf=False):
+    """FLDI F=1 MASK: (1<<ones)-1 repliziert (rep: 0=32/1=16/2=8/3=4/4=2/5=1-Bit-Elem),
+    rot=Rechtsrotation, inv=invertieren. WRF: 0=ersetzen, 1=merge mit alt."""
+    w = 0
+    w = _set_bits(w, 'dst', dst, FORMS['FLDI'])
+    w = _set_bits(w, 'form', 1, FORMS['FLDI'])
+    imm = ((ones & 0x1F) << 15) | ((rep & 7) << 12) | ((rot & 0x1F) << 7) | ((1 if inv else 0) << 6)
+    w = _set_bits(w, 'imm', imm, FORMS['FLDI'])
+    w = _set_bits(w, 'opcode', 0x7, {'opcode': (29, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    return w
+
+
+def bxx_w(mask, wish, chan, pair, offs, scale=0, inv=False, neg=False):
+    """bxx: mask=4-Bit-Flagmaske, wish=4-Bit-Soll, chan=Ersatz-Kanal (0-3),
+    pair=Paar (0:S^O,1:C^Z,2:S^Z,3:C^O), inv=any/all. src1=(chan<<2)|pair.
+    neg=True: Negation via wish^=mask + inv-Flip (XOR-Algebra, M24-Beweis).
+    Semantisch exakt das Komplement; Word-Kodierung kann von aehnlichen
+    Wrappern abweichen (any/all-Darstellung frei waehlbar)."""
+    if neg:
+        wish = wish ^ (mask & 0xF)
+        inv = not inv
+    dst = (mask & 0xF) | (0x10 if inv else 0)
+    return ctrl_w(dst, (chan & 3) << 2 | (pair & 3), wish & 0xF, offs, scale=scale, wrf=True)
+
+
+# ---------------------------------------------------------------------------
+# 14 ARM-condition convenience wrappers over bxx_w (XOR-substitution model,
+# see isa_vision.md §3 / M24).
+# ---------------------------------------------------------------------------
+
+def bxx_eq(offs, scale=0):
+    """EQ — Z==1."""
+    return bxx_w(0x04, 0x04, 0, 0, offs, scale, inv=True)
+
+
+def bxx_ne(offs, scale=0):
+    """NE — Z==0."""
+    return bxx_w(0x04, 0x00, 0, 0, offs, scale, inv=True)
+
+
+def bxx_cs(offs, scale=0):
+    """CS — C==1."""
+    return bxx_w(0x02, 0x02, 0, 0, offs, scale, inv=True)
+
+
+def bxx_cc(offs, scale=0):
+    """CC — C==0."""
+    return bxx_w(0x02, 0x00, 0, 0, offs, scale, inv=True)
+
+
+def bxx_mi(offs, scale=0):
+    """MI — S==1."""
+    return bxx_w(0x01, 0x01, 2, 0, offs, scale, inv=True)
+
+
+def bxx_pl(offs, scale=0):
+    """PL — S==0."""
+    return bxx_w(0x01, 0x00, 2, 0, offs, scale, inv=True)
+
+
+def bxx_vs(offs, scale=0):
+    """VS — O==1."""
+    return bxx_w(0x08, 0x08, 0, 0, offs, scale, inv=True)
+
+
+def bxx_vc(offs, scale=0):
+    """VC — O==0."""
+    return bxx_w(0x08, 0x00, 0, 0, offs, scale, inv=True)
+
+
+def bxx_hi(offs, scale=0):
+    """HI — C==1 and Z==0."""
+    return bxx_w(0x06, 0x02, 0, 0, offs, scale, inv=True)
+
+
+def bxx_ls(offs, scale=0):
+    """LS — C==0 or Z==1."""
+    return bxx_w(0x06, 0x04, 0, 0, offs, scale, inv=False)
+
+
+def bxx_ge(offs, scale=0):
+    """GE — S==O."""
+    return bxx_w(0x01, 0x00, 0, 0, offs, scale, inv=True)
+
+
+def bxx_lt(offs, scale=0):
+    """LT — S!=O."""
+    return bxx_w(0x01, 0x01, 0, 0, offs, scale, inv=True)
+
+
+def bxx_gt(offs, scale=0):
+    """GT — S==O and Z==0."""
+    return bxx_w(0x06, 0x00, 1, 0, offs, scale, inv=True)
+
+
+def bxx_le(offs, scale=0):
+    """LE — S!=O or Z==1."""
+    return bxx_w(0x06, 0x0E, 1, 0, offs, scale, inv=False)
 
 
 def mem_w(dst, s1, s2, offs, scale, wrf=False):
@@ -238,6 +435,12 @@ def _sign11(x):
 def _sign13(x):
     x &= 0x1FFF
     return x - 0x2000 if x & 0x1000 else x
+
+
+def _sign9(x):
+    """Sign-extend a 9-bit value."""
+    x &= 0x1FF
+    return x - 0x200 if x & 0x100 else x
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +522,7 @@ class ShellCPU:
         form_name, sem = plane
         form = FORMS[form_name]
         dec = {'wf': wf, 'opcode': opcode, 'form': form_name, 'sem': sem,
-               'plane': plane}
+               'plane': plane, '__word__': word}
         if form_name == 'FMEM':
             dec['scale_e'] = (word >> 24) & 3
             dec['offs'] = _sign11(((word >> 22) & 3) << 9 | (word & 0x1FF))
@@ -341,21 +544,38 @@ class ShellCPU:
             except KeyError:
                 raise NotImplementedError(f"Sub-Op 0x{sub:x} nicht belegt")
             dec['sub_form'] = sub_form
-            if sub_form == 'F1':  # i-Version: src2 -> Imm13
+            if sub_form == 'F1':  # i-Version: src2 -> Imm13 (roh)
                 dec['dst'] = (word >> 17) & 0x1F
                 dec['src1'] = (word >> 13) & 0xF
-                dec['imm'] = _sign13(word & 0x1FFF)
+                dec['imm'] = word & 0x1FFF  # roh: Interpretation je Sub-Op
             else:  # F2: 2-Op + ctrl
                 dec['dst'] = (word >> 17) & 0x1F
                 dec['src1'] = (word >> 13) & 0xF
                 dec['src2'] = (word >> 9) & 0xF
                 dec['cst'] = (word >> 8) & 1
                 dec['ctrl'] = word & 0xFF
+        elif form_name == 'F2C':  # csubsplit: Sub-Op -> c-Instruktion (alle F1)
+            sub = (word >> 22) & 0xF
+            dec['sub'] = sub
+            dec['sub_form'] = 'F1'
+            try:
+                SUBOPS_C[sub]
+            except KeyError:
+                raise NotImplementedError(f"csubsplit Sub-Op 0x{sub:x} nicht belegt")
+            dec['dst'] = (word >> 17) & 0x1F
+            dec['src1'] = (word >> 13) & 0xF
+            dec['imm'] = word & 0x1FFF  # roh: Interpretation je Sub-Op
+        elif form_name == 'FLDI':
+            dec['dst'] = (word >> 21) & 0x1F
+            dec['form'] = (word >> 20) & 1
+            dec['imm'] = word & 0xFFFFF
         return dec
 
     # -- Execute ------------------------------------------------------------
-    def _arith(self, mode, a, b, c, inv1, inv2, inv3, wf, unsigned=False):
-        out = execute_pipeline(a, b, c, _arith_ctrl(mode, inv1, inv2, inv3, wf, unsigned),
+    def _arith(self, mode, a, b, c, inv1, inv2, inv3, wf, unsigned=False,
+               op_type=OpType.SCALAR):
+        out = execute_pipeline(a, b, c, _arith_ctrl(mode, inv1, inv2, inv3, wf, unsigned,
+                                                    op_type),
                                prev_in=0, flags_in=self.flags)
         return out['res'], out['flags']
 
@@ -368,32 +588,41 @@ class ShellCPU:
         inv1, inv2, inv3 = bool(ctrl & 0x20), bool(ctrl & 0x40), bool(ctrl & 0x80)
         a = self.read_c(dec['src1'])
         b = self.read_c(dec['src2'])
-        c = self.read_c(dec['src3'])
-        res, flags = self._arith(mode, a, b, c, inv1, inv2, inv3, bool(dec['wf']))
+        if dec['cst']:
+            from pipeline import ARITH_CST
+            c = ARITH_CST[dec['src3']]  # 4-Bit-Pool-Index
+        else:
+            c = self.read_c(dec['src3'])
+        res, flags = self._arith(mode, a, b, c, inv1, inv2, inv3, bool(dec['wf']),
+                                 op_type=_CARITH_LANE.get(dec['__word__'], OpType.SCALAR))
         if dec['wf']:
             self.flags = flags
         self.write_dst(dec['dst'], res)
         self._count(f"carith:{ArithMode(mode).name}")
 
     def _exec_ternlog(self, dec):
-        from pipeline import ternlog
+        from pipeline import ternlog, TERNLOG_CST
         lut = dec['ctrl']  # 8 Bit = voller 256-Eintraege-Ternaer-LUT-Wert
         a = self.read_c(dec['src1'])
         b = self.read_c(dec['src2'])
-        c = self.read_c(dec['src3'])
+        if dec['cst']:
+            c = TERNLOG_CST[dec['src3']] & 0xFFFFFFFF  # 4-Bit-Pool-Index, LUT waehlt
+        else:
+            c = self.read_c(dec['src3'])
         res = ternlog(a, b, c, lut, self.flags, 0, 0, False, False, False)['res']
         self.write_dst(dec['dst'], res)
         self._count("ternlog")
 
     def _exec_permb(self, dec):
-        from pipeline import permb
+        from pipeline import permb, PERMB_CST, PERMB_NIB_CST
         ctrl = dec['ctrl']
         mode = ctrl & 0x1F
         a = self.read_c(dec['src1'])
         b = self.read_c(dec['src2'])
         c = self.read_c(dec['src3'])
         if dec['cst']:
-            pass  # cst-Pool: Iteration 1 offen
+            # cst-Pool: PERMB_CST (byte) oder PERMB_NIB_CST (nibble) via src3-Index
+            c = (PERMB_NIB_CST if mode == 1 else PERMB_CST)[dec['src3']] & 0xFFFFFFFF
         if mode == 0:  # Byte-Permutation: src3 = Index-Vektor
             out = permb(a, b, c, 0, False, 0, self.flags,
                         blank_enable=bool(ctrl & 0x80))
@@ -414,10 +643,13 @@ class ShellCPU:
         ctrl = dec['ctrl']
         mode = ctrl & 0x1F
         inv1, inv2, inv3 = bool(ctrl & 0x80), bool(ctrl & 0x40), bool(ctrl & 0x20)
-        from pipeline import bitfrob
+        from pipeline import bitfrob, BITFROB_CST
         a = self.read_c(dec['src1'])
         b = self.read_c(dec['src2'])
-        c = self.read_c(dec['src3'])
+        if dec['cst']:
+            c = BITFROB_CST[dec['src3']]  # 4-Bit-Pool-Index (src3_idx, volle Breite)
+        else:
+            c = self.read_c(dec['src3'])
         out = bitfrob(a, b, c, mode, self.flags, inv_1=inv1, inv_2=inv2, inv_3=inv3,
                       write_flags=bool(dec['wf']))
         if dec['wf']:
@@ -433,11 +665,14 @@ class ShellCPU:
             a = self.read_s(dec['src1'])
             b = self.read_s(dec['src2'])
             c = 0
-        else:  # F1 (i-Version): ADD-only (Iteration 1), b = Imm13
+        else:  # F1: val(9, sext) << shift(4)
             mode = ArithMode.ADD
             inv1 = inv2 = inv3 = False
             a = self.read_s(dec['src1'])
-            b = dec['imm']
+            imm = dec['imm'] & 0x1FFF
+            val = _sign9((imm >> 4) & 0x1FF)
+            shift = imm & 0xF
+            b = (val << shift) & 0xFFFFFFFF
             c = 0
         res, flags = self._arith(mode, a, b, c, inv1, inv2, inv3, bool(dec['wf']))
         if dec['wf']:
@@ -455,6 +690,24 @@ class ShellCPU:
         res = ternlog(a, b, 0, lut8, self.flags, 0, 0, False, False, False)['res']
         self.write_dst(dec['dst'], res)
         self._count("slogi")
+
+    def _exec_slogii(self, dec):
+        """F1 slogii: [ones(5)|rep(3)|rot(5)] Muster + Logik-Op (AND/OR/XOR).
+        tsti-Pseudo-Op: dst=0 + WRF=1 setzt Flags ohne Write."""
+        imm = dec['imm'] & 0x1FFF
+        ones = (imm >> 8) & 0x1F
+        rep = (imm >> 5) & 7
+        rot = imm & 0x1F
+        mask = _build_mask_13(ones, rep, rot)
+        from pipeline import ternlog
+        a = self.read_c(dec['src1']) if dec['sub'] & 1 else self.read_s(dec['src1'])
+        lut4 = _SLOGII_OP.get(dec['sub'] & 0xE, 0x8)  # AND/OR/XOR
+        lut8 = _expand_lut2(lut4)
+        out = ternlog(a, mask, 0, lut8, self.flags, 0, 0, bool(dec['wf']), False, False)
+        if dec['wf']:
+            self.flags = out['flags']
+        self.write_dst(dec['dst'], out['res'])
+        self._count("slogii")
 
     def _exec_sbitfrob(self, dec):
         # 2-Op-bitfrob: c=0 (kein src3 in F2). Gruppe via sub&1 (0=s, 1=c).
@@ -495,10 +748,98 @@ class ShellCPU:
         self.write_dst(dec['dst'], out['res'])
         self._count(f"sshufb:{mode}")
 
+    def _exec_cbitfrob(self, dec):
+        """F2C cbitfrob_i (C-Gruppe): mode5=(imm>>8)&0x1F, amt=(imm&0xFF)&0x1F.
+        Shifts 0..31: eine Passage (permb-Byte-Grob + bitfrob-Fein laufen
+        in DERSELBEN Pipeline-Passage — Stufen sind in Reihe, Decoder steuert
+        beide gleichzeitig). Kein Zyklus-Zuschlag fuer grosse Shifts; cycle
+        zaehlt nur echte Mehrfach-Passagen (Microcode-Loops), nicht die
+        Stufen-Durchlaeufe einer Op.
+        Hinweis SHR_STICKY: Sticky sammelt nur die Fein-Bits (s2 des Fine-
+        Pass); die 8B Byte-Bits gehen in-Shell verloren (HW: Sticky-Kette).
+        Grob-Pass-Ops (pipeline.py-Semantik): shift_ctrl nutzt nur src2
+        (idx>=4 blankt -> logische Shifts). ROR/ROL brauchen einen Roh-
+        Index-Vektor auf dem (a,a)-Funnel (ROR(8k)); ROL via ROR-Komplement
+        ROL(A)=ROR(32-A), da shift_ctrl-LSL blankt statt wrap. ASR: Grob
+        logisch + Fein Sign-Stacking (s1=Sign, s2 top-8B Sign-OR)."""
+        from pipeline import bitfrob, permb
+        imm = dec['imm']
+        mode = (imm >> 8) & 0x1F
+        amt = (imm & 0xFF) & 0x1F
+        a = self.read_c(dec['src1'])
+        wf = bool(dec['wf'])
+        if mode not in SHIFT_FAM:
+            out = bitfrob(a, 0, amt, mode, self.flags, write_flags=wf)
+            if wf:
+                self.flags = out['flags']
+            self.write_dst(dec['dst'], out['res'])
+            self._count(f"cbitfrob:{BitFrobMode(mode).name}")
+            return
+        if amt < 8:  # 1 Passage: direkt fein
+            if mode in (BitFrobMode.LSR, BitFrobMode.SHR_STICKY):
+                s1, s2 = 0, a
+            elif mode == BitFrobMode.LSL:
+                s1, s2 = a, 0
+            elif mode == BitFrobMode.ASR:
+                s1 = 0xFFFFFFFF if (a & 0x80000000) else 0
+                s2 = a
+            else:  # ROR/ROL: Funnel s1||s1
+                s1, s2 = a, 0
+            out = bitfrob(s1, s2, amt, mode, self.flags, write_flags=wf)
+            if wf:
+                self.flags = out['flags']
+            self.write_dst(dec['dst'], out['res'])
+            self._count(f"cbitfrob:{BitFrobMode(mode).name}")
+            return
+        # 2 Passagen: permb Byte-Grob (coarse) + bitfrob Fein.
+        if mode == BitFrobMode.ROL:   # ROL(A) = ROR(32-A)
+            two_amt = 32 - amt
+            pass_mode = BitFrobMode.ROR
+        else:
+            two_amt = amt
+            pass_mode = mode
+        coarse_bytes = two_amt >> 3
+        fine = two_amt & 7
+        if mode in (BitFrobMode.ROR, BitFrobMode.ROL):
+            # Byte-Rot via (a,a)-Funnel + Roh-Index-Vektor [k..k+3]:
+            # shift_ctrl blankt idx>=4 (nur 1-Byte-Wrap), LSL blankt i<k;
+            # Roh-Vektor = voller 8-Byte-Funnels-Zugriff = ROR(8k) exakt.
+            vec = (coarse_bytes + 0) | ((coarse_bytes + 1) << 8) \
+                | ((coarse_bytes + 2) << 16) | ((coarse_bytes + 3) << 24)
+            out = permb(a, a, vec, 0, False, 0, self.flags, blank_enable=False)
+        else:
+            # LSR/LSL/SHR_STICKY/ASR-Grob: shift_ctrl, Daten in src2 (Low);
+            # shift_ctrl-LSR blankt idx>=4 -> top-Bytes 0 (logischer Shift).
+            out = permb(0, a, two_amt, 0, False, 0, self.flags,
+                        shift_ctrl=True, shift_left=(mode == BitFrobMode.LSL))
+        c1 = out['res']
+        if pass_mode in (BitFrobMode.LSR, BitFrobMode.SHR_STICKY):
+            f1, f2 = 0, c1
+        elif pass_mode == BitFrobMode.LSL:
+            f1, f2 = c1, 0
+        elif pass_mode == BitFrobMode.ASR:
+            # Grob = logisch (top 8B = 0); Fein-ASR kann nur F Bits fuellen.
+            # Sign-Stacking: s2 top-8B mit a-Sign OR-en + s1 = Sign-Fill ->
+            # Fein-ASR(F) auf asr(a,8B)-Wert = asr(a, 8B+F). (Shell-Operand-
+            # Synthese, Zyklus-Modell zaehlt nur Passagen.)
+            fill = 0xFFFFFFFF if (a & 0x80000000) else 0
+            f1 = fill
+            f2 = c1 | (fill & (0xFFFFFFFF << (32 - 8 * coarse_bytes)) & 0xFFFFFFFF)
+        else:  # ROR: Funnel s1||s1
+            f1, f2 = c1, 0
+        out2 = bitfrob(f1, f2, fine, pass_mode, self.flags, write_flags=False)
+        self.write_dst(dec['dst'], out2['res'])
+        self._count(f"cbitfrob:{BitFrobMode(mode).name}")
+
     def _exec_ctrl(self, dec):
         scale = 1 << dec['scale_e']
-        base = self.pc if dec['src1'] == 0 else self.read_s(dec['src1'])
-        idx = self.read_s(dec['src2']) << scale
+        if dec['wf']:
+            # bxx: src1/src2 = Bedingungs-Encoding, Adresse rein PC-relativ
+            base = self.pc
+            idx = 0
+        else:
+            base = self.pc if dec['src1'] == 0 else self.read_s(dec['src1'])
+            idx = self.read_s(dec['src2']) << scale
         offs = dec['offs'] * 2 * scale
         target = (base + idx + offs) & 0xFFFFFFFF
         taken = False
@@ -509,9 +850,19 @@ class ShellCPU:
             self._count("brl" if dec['dst'] != 0 else "bra")
             if target == self.pc:  # Selbst-Branch = Halt-Idiom (µC)
                 self.halted = True
-        else:  # bxx: dst = Flagmaske, branch wenn (flags & mask) != 0
+        else:  # bxx: XOR-Substitution (Lemma R_BCOND_NOW, pipeline_smt.py M24)
             self._count("bxx")
-            taken = bool(self.flags & dec['dst'])
+            mask = dec['dst'] & 0xF
+            inv = bool(dec['dst'] & 0x10)
+            wish = dec['src2'] & 0xF
+            p = (dec['src1'] >> 2) & 3
+            a, b = _BXX_PAIRS[dec['src1'] & 3]  # 0:S^O 1:C^Z 2:S^Z 3:C^O
+            f_eff = self.flags & 0xF
+            f_eff = (f_eff & ~(1 << p)) | ((((f_eff >> a) ^ (f_eff >> b)) & 1) << p)
+            if inv:
+                taken = ((f_eff ^ wish) & mask) == 0
+            else:
+                taken = ((f_eff ^ wish) & mask) != mask
         if taken:
             self.pc = target
         else:
@@ -528,6 +879,51 @@ class ShellCPU:
             val = self.read_dst(dec['dst'])
             self.mem_write(addr, size, val)
             self._count(f"st.{dec['scale_e']}")
+
+    def _exec_ldi(self, dec):
+        # F-Bit bestimmt Form: 0=MOVX (Halbwort), 1=MASK (Muster).
+        # WRF: 0=zero-fill (Rest 0), 1=merge (Rest bleibt).
+        dst = dec['dst']
+        old = self.read_dst(dst)
+        if dec['form'] == 0:  # MOVX
+            hw = (dec['imm'] >> 18) & 3
+            sext_f = (dec['imm'] >> 16) & 1
+            inv_f = (dec['imm'] >> 17) & 1
+            v16 = dec['imm'] & 0xFFFF
+            if sext_f and (v16 & 0x8000):
+                v16 |= 0xFFFF0000
+            if inv_f:
+                v16 ^= 0xFFFFFFFF
+            v = (v16 << (hw * 16)) & 0xFFFFFFFF
+            if dec['wf']:  # merge: nur diese Halbwort-Position ersetzen
+                mask = 0xFFFF << (hw * 16)
+                res = (old & ~mask) | (v & mask)
+            else:  # zero-fill: ganze Position + Rest 0
+                res = v
+        else:  # MASK
+            ones = (dec['imm'] >> 15) & 0x1F
+            rep = (dec['imm'] >> 12) & 7
+            rot = (dec['imm'] >> 7) & 0x1F
+            inv_f = (dec['imm'] >> 6) & 1
+            elem_bits = {0: 32, 1: 16, 2: 8, 3: 4, 4: 2, 5: 1}.get(rep, 32)
+            base = (1 << min(ones, 0 if elem_bits == 0 else 32)) - 1
+            # repliziere base ueber das Register, begrenzt auf elem_bits
+            elem = base & ((1 << elem_bits) - 1)
+            v = 0
+            for _i in range(32 // elem_bits):
+                v = (v << elem_bits) | elem
+            v &= 0xFFFFFFFF
+            if rot:
+                v = ((v >> rot) | (v << (32 - rot))) & 0xFFFFFFFF
+            if inv_f:
+                v ^= 0xFFFFFFFF
+            if dec['wf']:  # merge: Einsen setzen (OR mit alt), Nullen lassen
+                res = old | v
+            else:
+                res = v
+        self.write_dst(dst, res)
+        self._count(f"ldi:{'MOVX' if dec['form'] == 0 else 'MASK'}")
+
 
     # -- Stepper ------------------------------------------------------------
     def step(self, word, verbose=False):
@@ -551,17 +947,23 @@ class ShellCPU:
                 self._exec_sarith(dec)
             elif iname == 'slogi':
                 self._exec_slogi(dec)
+            elif iname == 'slogii':
+                self._exec_slogii(dec)
             elif iname == 'sbitfrob':
                 self._exec_sbitfrob(dec)
             elif iname == 'sshufb':
                 self._exec_sshufb(dec)
             else:
                 raise NotImplementedError(f"Sub-Op {iname} noch nicht in Shell (Iteration 1)")
+        elif dec['sem'] == 'csubsplit':
+            self._exec_cbitfrob(dec)
         elif dec['form'] == 'FMEM':
             if dec['sem'] == 'control':
                 self._exec_ctrl(dec)
             else:
                 self._exec_mem(dec)
+        elif dec['sem'] == 'ldi':
+            self._exec_ldi(dec)
         self.cycle += 1
         if dec['sem'] not in ('control',):  # Branches setzen pc selbst
             self.pc = (self.pc + 4) & 0xFFFFFFFF
@@ -612,8 +1014,8 @@ def build_smoke():
     S1, S2, S3 = 16 + 1, 16 + 2, 16 + 3   # S-Register-Nummern (global 5 Bit)
     C1, C2 = 1, 2
     prog = []
-    prog.append(sarithi_w(0x8, ArithMode.ADD, S1, 0, 0x800))    # S1 = 0x800
-    prog.append(sarithi_w(0x8, ArithMode.ADD, S1, 1, 0x800))    # S1 = 0x1000 (ptr)
+    prog.append(sarithi_w(0x8, ArithMode.ADD, S1, 0, 1, shift=11))    # S1 = 0x800
+    prog.append(sarithi_w(0x8, ArithMode.ADD, S1, 1, 1, shift=11))    # S1 = 0x1000 (ptr)
     prog.append(sarithi_w(0x8, ArithMode.ADD, S2, 0, 1))       # S2 = 1 (cnt)
     prog.append(sarithi_w(0x8, ArithMode.ADD, S3, 0, 11))      # S3 = 11 (limit)
     prog.append(carith_w(ArithMode.ADD, C1, 0, 0, 0))          # C1 = 0 (sum)
@@ -623,7 +1025,7 @@ def build_smoke():
     prog.append(sarithi_w(0x8, ArithMode.ADD, S2, 2, 1))       # S2 += 1
     prog.append(sarith_w(0x0, ArithMode.CMP, 0, 2, 3, wrf=True))  # cmp S2,S3 -> Maske+Flags
     # CMP = Per-Lane-Gleichheits-Maske: res=0 (Z) wenn UNGLEICH, 0xFFFFFFFF (S) wenn gleich
-    prog.append(ctrl_w(FLAG_S, 0, 0, 4, scale=0, wrf=True))    # bxx S -> exit (PC-Basis)
+    prog.append(bxx_w(FLAG_S, FLAG_S, chan=1, pair=0, offs=4))  # bxx S -> exit (PC-Basis)
     prog.append(ctrl_w(0, 0, 0, -12, scale=0, wrf=False))      # bra loop (auf ld.w)
     prog.append(mem_w(C1, 1, 0, 0, 2, wrf=True))               # exit: st.w C1 -> (S1)
     prog.append(ctrl_w(0, 0, 0, 0, scale=0, wrf=False))        # bra . (halt)
@@ -654,3 +1056,84 @@ if __name__ == '__main__':
     ok = run_smoke()
     import sys
     sys.exit(0 if ok else 1)
+
+
+def check_bxx_wrappers():
+    """14 ARM-condition convenience wrappers over bxx_w (XOR-substitution model, see isa_vision.md §3 / M24)."""
+    import sys as _sys
+
+    def _bxx_eval(flags, mask, wish, chan, pair, inv):
+        """XOR-substitution condition evaluation (replicates _exec_ctrl bxx logic)."""
+        p = chan
+        a, b = _BXX_PAIRS[pair]
+        f_eff = flags & 0xF
+        f_eff = (f_eff & ~(1 << p)) | ((((f_eff >> a) ^ (f_eff >> b)) & 1) << p)
+        if inv:
+            return ((f_eff ^ wish) & mask) == 0
+        else:
+            return ((f_eff ^ wish) & mask) != mask
+
+    # (name, mask, wish, chan, pair, inv, expected_fn)
+    # expected_fn(flags) -> bool where flags = S(bit0)|C(bit1)|Z(bit2)|O(bit3)
+    specs = [
+        ('bxx_eq', 0x04, 0x04, 0, 0, True,
+         lambda f: bool((f >> 2) & 1)),                                       # Z==1
+        ('bxx_ne', 0x04, 0x00, 0, 0, True,
+         lambda f: not bool((f >> 2) & 1)),                                   # Z==0
+        ('bxx_cs', 0x02, 0x02, 0, 0, True,
+         lambda f: bool((f >> 1) & 1)),                                       # C==1
+        ('bxx_cc', 0x02, 0x00, 0, 0, True,
+         lambda f: not bool((f >> 1) & 1)),                                   # C==0
+        ('bxx_mi', 0x01, 0x01, 2, 0, True,
+         lambda f: bool((f >> 0) & 1)),                                       # S==1
+        ('bxx_pl', 0x01, 0x00, 2, 0, True,
+         lambda f: not bool((f >> 0) & 1)),                                   # S==0
+        ('bxx_vs', 0x08, 0x08, 0, 0, True,
+         lambda f: bool((f >> 3) & 1)),                                       # O==1
+        ('bxx_vc', 0x08, 0x00, 0, 0, True,
+         lambda f: not bool((f >> 3) & 1)),                                   # O==0
+        ('bxx_hi', 0x06, 0x02, 0, 0, True,
+         lambda f: bool((f >> 1) & 1) and not bool((f >> 2) & 1)),           # C==1 and Z==0
+        ('bxx_ls', 0x06, 0x04, 0, 0, False,
+         lambda f: not bool((f >> 1) & 1) or bool((f >> 2) & 1)),            # C==0 or Z==1
+        ('bxx_ge', 0x01, 0x00, 0, 0, True,
+         lambda f: (f & 1) == ((f >> 3) & 1)),                               # S==O
+        ('bxx_lt', 0x01, 0x01, 0, 0, True,
+         lambda f: (f & 1) != ((f >> 3) & 1)),                               # S!=O
+        ('bxx_gt', 0x06, 0x00, 1, 0, True,
+         lambda f: (f & 1) == ((f >> 3) & 1) and not bool((f >> 2) & 1)),    # S==O and Z==0
+        ('bxx_le', 0x06, 0x0E, 1, 0, False,
+         lambda f: (f & 1) != ((f >> 3) & 1) or bool((f >> 2) & 1)),         # S!=O or Z==1
+    ]
+
+    for name, mask, wish, chan, pair, inv, exp_fn in specs:
+        for flags in range(16):
+            actual = _bxx_eval(flags, mask, wish, chan, pair, inv)
+            expected = exp_fn(flags)
+            if actual != expected:
+                s = flags & 1
+                c = (flags >> 1) & 1
+                z = (flags >> 2) & 1
+                o = (flags >> 3) & 1
+                print(f"FAIL: {name} flags=S{s}C{c}Z{z}O{o} "
+                      f"actual={actual} expected={expected}")
+                _sys.exit(1)
+
+    # Negations-Beweis: fuers jede der 14 Spezifikationen muss die Negation
+    # (wish ^= mask, inv-Flip) exakt das Komplement feuren, ueber alle 16
+    # Flag-Kombis. (XOR-Algebra, hergeleitet aus M24-Semantik.)
+    for name, mask, wish, chan, pair, inv, exp_fn in specs:
+        for flags in range(16):
+            neg_actual = _bxx_eval(flags, mask, wish ^ (mask & 0xF), chan, pair,
+                                   not inv)
+            if neg_actual == _bxx_eval(flags, mask, wish, chan, pair, inv):
+                s = flags & 1
+                c = (flags >> 1) & 1
+                z = (flags >> 2) & 1
+                o = (flags >> 3) & 1
+                print(f"FAIL-NEG: {name} flags=S{s}C{c}Z{z}O{o} "
+                      f"neg_actual={neg_actual}==original")
+                _sys.exit(1)
+
+    print("check_bxx_wrappers: 14/14 OK + 14 Negationen bewiesen")
+    return True

@@ -1178,14 +1178,14 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
     aux_cmp = s3  # default: bei CMP-Mode ueberschrieben mit XOR-Diff (per-Lane, 0-cost Tap)
     div_zero_or_ovf = False  # DIV-Dispatch setzt True (div-zero/overflow); hier vorab fuer pyright
     if mode_imm6 == ArithMode.ADD: # Normal Add (Sub = Add mit inv_2/inv_3, kein eigenes SUB noetig)
-        res = s1 + s2 + s3
+        res = (s1 + s2 + s3) & MASK_RLEN
     elif mode_imm6 == ArithMode.ADDC: # Add with Carry (Flags). inv_2=True = SUBB-Integration:
         #   b dreht Vorzeichen (negate_lanes, Zeile 1161: -b) und der Carry-Beitrag wird
         #   Borrow (c-1 statt c) -> res = a - b - 1 + c = a + ~b + c (ARM SBC). Der
         #   Addierer-CarryOut dieser Summe IST "kein-Borrow" (a+~b+c >= 2^32  <=> a >=
         #   b+borrow) -> der Flags-Branch braucht C-keinen-Sonderfall. Kern: a + Komp + Slot.
         c_add = (1 if (flags_in & FLAG_C) else 0) - (1 if inv_2 else 0)
-        res = s1 + s2 + s3 + c_add
+        res = (s1 + s2 + s3 + c_add) & MASK_RLEN
     elif mode_imm6 == ArithMode.PADD: # Packed Add: Carry-Kette per Lane aufgetrennt (Lane-Breite via op_type_1)
         lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
         lm = 0x7F7F7F7F if lane_bits == 8 else (0x7FFF7FFF if lane_bits == 16 else 0x7FFFFFFF)
@@ -1238,9 +1238,9 @@ def arith4(src1, src2, src3, mode_imm6, flags_in, inv_1=False, inv_2=False, inv_
         # schreiben schlicht keine Flags); bleibt fuer Carry-als-Datenwert-Faelle.
         res = 1 if (flags_in & FLAG_C) else 0
     elif mode_imm6 == ArithMode.ADDSHIFT1: # AddShifted LSL#1: s1 + (s2<<1) (lea / *3; feste Verdrahtung, 0 Gates)
-        res = s1 + ((s2 & MASK_RLEN) << 1)
+        res = (s1 + ((s2 & MASK_RLEN) << 1)) & MASK_RLEN
     elif mode_imm6 == ArithMode.ADDSHIFT2: # AddShifted LSL#2: s1 + (s2<<2) (lea / *5; feste Verdrahtung, 0 Gates)
-        res = s1 + ((s2 & MASK_RLEN) << 2)
+        res = (s1 + ((s2 & MASK_RLEN) << 2)) & MASK_RLEN
     elif mode_imm6 in (ArithMode.PMIN, ArithMode.PMAX): # Min/Max: per-Lane Borrow via Carry-Chain-Taps (Lane-Breite via op_type_1)
         lane_bits = 8 if op_type_1 == OpType.BYTE else (16 if op_type_1 == OpType.WORD else 32)
         lane_max = (1 << lane_bits) - 1
