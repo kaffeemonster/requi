@@ -3,7 +3,7 @@
 Sandwich-Simulator fuer die Papier-Encoding-Entwuerfe aus isa_vision.md:
     fetch -> decode -> [permb -> bitfrob -> ternlog -> arith4] -> writeback
 Die Kern-Stufen kommen aus pipeline.py (execute_pipeline); diese Shell ergaenzt
-PC, Register-File (C/S-Gruppen), Memory (RAM + MSR-pseudo-MMIO) und einen
+PC, Register-File (C/S-Gruppen), Memory (RAM + MSR-pseudo-MMIO @ Top) und einen
 rudimentaeren Decoder fuer die ISA-Formen.
 
 ITERATION 1 (Kern-Zyklus): carith (F3) + sarith (F2-Sub) + Control (bra/brl/bxx)
@@ -18,7 +18,9 @@ VEREINFACHUNGEN (Iteration 1, sind in isa_vision.md als offen markiert):
   Offset breiten-skaliert (ARM-LDR-artig). Control: base + (idx << scale) + (offs*2 << scale).
 - 1 Cycle/Instruktion (keine Pipeline-Stalls).
 - unsigned-Signal: Assembler-Parameter (Encoding-Position im carith noch offen).
-- MSR-Region (0x000-0xFFF): Vektor/IDENT/FLAGS/PC/CYCLE lesbar, Schreiben ignoriert.
+- MSR-Region (0xFFFFF000-0xFFFFFFFF, Top): Reset-Vektor = letztes Wort 0xFFFFFFFC,
+  via ld zero_reg + negativer Offset; Bottom 0x0 frei fuer Vektor-Tabellen.
+  Vektor/IDENT/FLAGS/PC/CYCLE lesbar, Schreiben ignoriert.
 """
 import struct as _struct
 
@@ -44,7 +46,7 @@ FORMS = {
     'FLDI': {'dst': (25, 21), 'form': (20, 20), 'imm': (19, 0)},
 }
 
-# PLANES: opcode-Feld (29-26) -> (Form, Semantik)
+# PLANES: plane-Feld (30-26) -> (Form, Semantik)
 PLANES = {
     0x0: ('F3', 'carith'),
     0x1: ('F3', 'ternlog'),
@@ -86,16 +88,19 @@ SUBOPS_C = {
 SHIFT_FAM = {BitFrobMode.LSR, BitFrobMode.LSL, BitFrobMode.ASR,
              BitFrobMode.ROR, BitFrobMode.ROL, BitFrobMode.SHR_STICKY}
 
-# MSR-Region (pseudo-MMIO, 0x000-0xFFF); Register im untersten Block
-MSR_VECTOR = 0x000  # Reset-Vektor: PC-Startwert (Wort)
-MSR_IDENT = 0x004   # Feature/Ident-Register (lesbar)
-MSR_FLAGS = 0x008   # Flags-Register (lesbar)
-MSR_PC = 0x00C      # PC (lesbar; PC-relative Adressierung)
-MSR_CYCLE = 0x010   # Cycle-Counter (lesbar)
-MSR_END = 0x1000    # Ende der MSR-Region
+# MSR-Region (pseudo-MMIO) am TOP des 32-Bit-Adressraums — via negativer
+# Zero-Reg-Offsets erreichbar; Bottom (0x0) frei fuer Vektor-Tabellen.
+MSR_BASE   = 0xFFFFF000   # Region-Basis (4K)
+MSR_TOP    = 0x100000000  # exclusive
+MSR_VECTOR = 0xFFFFFFFC   # Reset-Vektor: letztes Wort — ld zero, offs -2 (= -4 Bytes)
+MSR_IDENT  = 0xFFFFFFF8   # Feature/Ident (lesbar)
+MSR_FLAGS  = 0xFFFFFFF4   # Flags (lesbar)
+MSR_PC     = 0xFFFFFFF0   # PC (lesbar)
+MSR_CYCLE  = 0xFFFFFFEC   # Cycle-Counter (lesbar)
+MSR_END    = 0x100000000  # Ende (exclusive), = MSR_TOP
 
 RAM_SIZE = 0x10000
-RESET_PC = 0x1000   # Default-Vektor
+RESET_PC = 0x1000   # Default-Vektor (Code-Base; unveraendert gueltig)
 
 # Bypass-Sub-ctrls (Muster aus helpers.py: prev_in_strobe=8 = durchreichen)
 _BXX_PAIRS = ((0, 3), (1, 2), (0, 2), (1, 3))  # bxx-Paar-Kodierung: S^O, C^Z, S^Z, C^O
@@ -152,8 +157,8 @@ def carith_w(mode, dst, s1, s2, s3=0, inv1=False, inv2=False, inv3=False,
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
     w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F3'])
-    w = _set_bits(w, 'opcode', 0x0, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x0, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     if op_type != OpType.SCALAR:
         _CARITH_LANE[w] = op_type
     return w
@@ -168,8 +173,8 @@ def ternlog_w(lut, dst, s1, s2, s3=0, cst=False, wrf=False):
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
     w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', lut & 0xFF, FORMS['F3'])
-    w = _set_bits(w, 'opcode', 0x1, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x1, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -183,8 +188,8 @@ def permb_w(mode, dst, s1, s2, s3, blank=False, cst=False, wrf=False):
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
     w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F3'])
-    w = _set_bits(w, 'opcode', 0x2, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x2, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -198,8 +203,8 @@ def bitfrob_w(mode, dst, s1, s2, s3=0, inv1=False, inv2=False, inv3=False, cst=F
     w = _set_bits(w, 'src2', s2, FORMS['F3'])
     w = _set_bits(w, 'cst', 1 if cst else 0, FORMS['F3'])
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F3'])
-    w = _set_bits(w, 'opcode', 0x3, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x3, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -213,8 +218,8 @@ def sarith_w(sub, mode, dst, s1, s2=0, inv1=False, inv2=False, inv3=False, wrf=F
     w = _set_bits(w, 'src2', s2, FORMS['F2'])
     w = _set_bits(w, 'cst', 0, FORMS['F2'])
     w = _set_bits(w, 'ctrl', ctrl, FORMS['F2'])
-    w = _set_bits(w, 'opcode', 0x4, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x4, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -228,8 +233,8 @@ def sarithi_w(sub, mode, dst, s1, val, shift=0, wrf=False):
     w = _set_bits(w, 'dst', dst, FORMS['F1'])
     w = _set_bits(w, 'src1', s1, FORMS['F1'])
     w = _set_bits(w, 'imm', imm & 0x1FFF, FORMS['F1'])
-    w = _set_bits(w, 'opcode', 0x4, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x4, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -242,8 +247,8 @@ def cbitfrob_i_w(mode, dst, s1, val, wrf=False):
     w = _set_bits(w, 'dst', dst, FORMS['F2C'])
     w = _set_bits(w, 'src1', s1, FORMS['F2C'])
     w = _set_bits(w, 'imm', imm & 0x1FFF, FORMS['F2C'])
-    w = _set_bits(w, 'opcode', 0x8, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x8, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -258,8 +263,8 @@ def ctrl_w(dst, s1, s2, offs, scale=0, wrf=False):
     w = _set_bits(w, 'src1', s1, FORMS['FMEM'])
     w = _set_bits(w, 'src2', s2, FORMS['FMEM'])
     w = _set_bits(w, 'off_lo', offs & 0x1FF, FORMS['FMEM'])
-    w = _set_bits(w, 'opcode', 0x5, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x5, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -277,8 +282,8 @@ def slogii_w(op, dst, s1, ones, rep, rot, wrf=False):
     w = _set_bits(w, 'dst', dst, FORMS['F1'])
     w = _set_bits(w, 'src1', s1, FORMS['F1'])
     w = _set_bits(w, 'imm', imm & 0x1FFF, FORMS['F1'])
-    w = _set_bits(w, 'opcode', 0x4, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x4, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -306,8 +311,8 @@ def ldi_movx_w(dst, imm16, hw=0, inv=False, sext=False, wrf=False):
     w = _set_bits(w, 'form', 0, FORMS['FLDI'])
     imm = ((hw & 3) << 18) | ((0x10000 if sext else 0)) | ((0x20000 if inv else 0)) | (imm16 & 0xFFFF)
     w = _set_bits(w, 'imm', imm, FORMS['FLDI'])
-    w = _set_bits(w, 'opcode', 0x7, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x7, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -319,8 +324,8 @@ def ldi_mask_w(dst, ones, rep, rot, inv=False, wrf=False):
     w = _set_bits(w, 'form', 1, FORMS['FLDI'])
     imm = ((ones & 0x1F) << 15) | ((rep & 7) << 12) | ((rot & 0x1F) << 7) | ((1 if inv else 0) << 6)
     w = _set_bits(w, 'imm', imm, FORMS['FLDI'])
-    w = _set_bits(w, 'opcode', 0x7, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x7, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -422,8 +427,8 @@ def mem_w(dst, s1, s2, offs, scale, wrf=False):
     w = _set_bits(w, 'src1', s1, FORMS['FMEM'])
     w = _set_bits(w, 'src2', s2, FORMS['FMEM'])
     w = _set_bits(w, 'off_lo', offs & 0x1FF, FORMS['FMEM'])
-    w = _set_bits(w, 'opcode', 0x6, {'opcode': (29, 26)})
-    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (30, 30)})
+    w = _set_bits(w, 'plane', 0x6, {'plane': (30, 26)})
+    w = _set_bits(w, 'write_read_flags', 1 if wrf else 0, {'write_read_flags': (31, 31)})
     return w
 
 
@@ -447,7 +452,7 @@ def _sign9(x):
 # CPU
 # ---------------------------------------------------------------------------
 class ShellCPU:
-    """RF (C0-C15/S0-S15, C0/S0=Zero), PC, FLAGS, RAM 64K + MSR-Overlay, Zaehler."""
+    """RF (C0-C15/S0-S15, C0/S0=Zero), PC, FLAGS, RAM 64K @ 0x0 + MSR @ Top, Zaehler."""
 
     def __init__(self, ram_size=RAM_SIZE, ident=0x00000001):
         self.rf = [0] * 32
@@ -458,8 +463,8 @@ class ShellCPU:
         self.ident = ident
         self.op_counts = {}
         self.halted = False
-        # Reset-Vektor (Wort an 0x000) = RESET_PC
-        _struct.pack_into('<I', self.ram, MSR_VECTOR, RESET_PC)
+        # Reset-Vektor (Wort an MSR_VECTOR @ Top) = RESET_PC; nicht RAM-gekoppelt
+        self.msr_vector = RESET_PC
 
     # -- Register-File -----------------------------------------------------
     def read_dst(self, i):
@@ -490,39 +495,40 @@ class ShellCPU:
         if addr == MSR_CYCLE:
             return self.cycle
         if addr == MSR_VECTOR:
-            return _struct.unpack_from('<I', self.ram, MSR_VECTOR)[0]
+            return self.msr_vector
         return 0  # reserviert
 
     def mem_read(self, addr, size):
-        if addr < MSR_END:  # MSR-Region abfangen
+        if addr >= MSR_BASE:  # MSR-Region abfangen (Top)
             val = 0
             for i in range(size):
-                val |= (self.msr_read(addr + i) & 0xFF) << (8 * i)
+                a = addr + i  # Byte-Zugriffe wort-aligniert auf Register abbilden
+                val |= ((self.msr_read(a & ~3) >> (8 * (a & 3))) & 0xFF) << (8 * i)
             return val
-        off = addr - MSR_END
+        off = addr
         if off + size > len(self.ram):
             raise ValueError(f"mem_read out of range: 0x{addr:x}+{size}")
         return int.from_bytes(self.ram[off:off + size], 'little')
 
     def mem_write(self, addr, size, val, warn=True):
-        if addr < MSR_END:
+        if MSR_BASE <= addr < MSR_TOP:
             if warn:
                 print(f"WARN: mem_write in MSR-Region verworfen: 0x{addr:x} size={size}")
             return  # MSR-Region schreibgeschuetzt (Iteration 1)
-        off = addr - MSR_END
+        off = addr
         if off + size > len(self.ram):
             raise ValueError(f"mem_write out of range: 0x{addr:x}+{size}")
         self.ram[off:off + size] = (val & ((1 << (8 * size)) - 1)).to_bytes(size, 'little')
 
     # -- Decode -------------------------------------------------------------
     def decode(self, word):
-        wf = (word >> 30) & 1
-        opcode = (word >> 26) & 0xF
-        plane = PLANES[opcode]
-        form_name, sem = plane
+        wf = (word >> 31) & 1
+        plane = (word >> 26) & 0x1F
+        plane_entry = PLANES[plane]
+        form_name, sem = plane_entry
         form = FORMS[form_name]
-        dec = {'wf': wf, 'opcode': opcode, 'form': form_name, 'sem': sem,
-               'plane': plane, '__word__': word}
+        dec = {'wf': wf, 'plane': plane, 'form': form_name, 'sem': sem,
+               'plane_entry': plane_entry, '__word__': word}
         if form_name == 'FMEM':
             dec['scale_e'] = (word >> 24) & 3
             dec['offs'] = _sign11(((word >> 22) & 3) << 9 | (word & 0x1FF))
@@ -929,7 +935,7 @@ class ShellCPU:
     def step(self, word, verbose=False):
         dec = self.decode(word)
         if verbose:
-            print(f"pc=0x{self.pc:08x} word=0x{word:08x} {dec['plane']}")
+            print(f"pc=0x{self.pc:08x} word=0x{word:08x} {dec['plane_entry']}")
         if dec['form'] == 'F3':
             if dec['sem'] == 'carith':
                 self._exec_carith(dec)
@@ -973,7 +979,7 @@ class ShellCPU:
             self.pc = start
         n = 0
         while n < limit and not self.halted:
-            pc_off = self.pc - MSR_END
+            pc_off = self.pc
             if pc_off < 0 or pc_off + 4 > len(self.ram):
                 raise ValueError(f"PC 0x{self.pc:x} ausserhalb RAM")
             word = int.from_bytes(self.ram[pc_off:pc_off + 4], 'little')
@@ -984,7 +990,7 @@ class ShellCPU:
         return n
 
     def load_words(self, addr, words):
-        base = addr - MSR_END
+        base = addr
         if base < 0 or base + 4 * len(words) > len(self.ram):
             raise ValueError(f"load_words out of range: 0x{addr:x}")
         for i, w in enumerate(words):
@@ -1006,7 +1012,8 @@ def _expand_lut2(lut4):
 
 # ---------------------------------------------------------------------------
 # Smoke-Programm: Summe 1..10 ueber ld/carith/sarith/bxx/bra/st
-# Layout: Daten bei 0x1000 (RAM-Offset 0), Code bei 0x1080 (load_words).
+# Layout: Daten bei 0x1000 (RAM-Offset 0x1000 — RAM flat @0, offset == addr),
+# Code bei 0x1080 (load_words).
 # Relative Branch-Offsets sind layout-unabhaengig (PC-Basis).
 # Imm13 signed reicht nicht fuer RAM-Basen >0xFFF (max 4095) -> 2x Add.
 # ---------------------------------------------------------------------------
@@ -1034,19 +1041,19 @@ def build_smoke():
 
 def run_smoke():
     cpu = ShellCPU()
-    # Daten: 10 Worte 1..10 bei Adresse 0x1000 (RAM-Offset 0)
+    # Daten: 10 Worte 1..10 bei Adresse 0x1000 (RAM-Offset 0x1000, flat)
     for i in range(10):
-        cpu.ram[4 * i:4 * i + 4] = (i + 1).to_bytes(4, 'little')
+        cpu.ram[0x1000 + 4 * i:0x1004 + 4 * i] = (i + 1).to_bytes(4, 'little')
     prog = build_smoke()
     cpu.load_words(0x1080, prog)
     n = cpu.run(prog, start=0x1080)
     print(f"instruktionen: {n}, cycle: {cpu.cycle}")
     print(f"op-counts: {dict(sorted(cpu.op_counts.items()))}")
     print(f"C1 (Summe 1..10): {cpu.read_dst(1)}  (erwartet 55)")
-    print(f"RAM[0x1028] (st.w Ergebnis): {int.from_bytes(cpu.ram[0x28:0x2C], 'little')}")
+    print(f"RAM[0x1028] (st.w Ergebnis): {int.from_bytes(cpu.ram[0x1028:0x102C], 'little')}")
     print(f"Flags: 0x{cpu.flags:x}  PC: 0x{cpu.pc:x}")
     ok = (cpu.read_dst(1) == 55
-          and int.from_bytes(cpu.ram[0x28:0x2C], 'little') == 55
+          and int.from_bytes(cpu.ram[0x1028:0x102C], 'little') == 55
           and cpu.flags & FLAG_S)
     print("SMOKE:", "PASS" if ok else "FAIL")
     return ok

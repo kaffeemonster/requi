@@ -52,12 +52,12 @@ def test_memcpy():
     ]
     cpu = ShellCPU()
     src_words = [(0xCAFE0000 + i * 0x101) & 0xFFFFFFFF for i in range(16)]
-    for i, w in enumerate(src_words):                   # 0x1100 = off 0x100
-        cpu.ram[0x100 + 4 * i:0x104 + 4 * i] = w.to_bytes(4, 'little')
+    for i, w in enumerate(src_words):                   # 0x1100 == RAM-Offset 0x1100
+        cpu.ram[0x1100 + 4 * i:0x1104 + 4 * i] = w.to_bytes(4, 'little')
     cpu.load_words(CODE, prog)
     n = cpu.run(prog, start=CODE)
-    dst = cpu.ram[0x400:0x440]                          # 0x1400 = off 0x400
-    src = cpu.ram[0x100:0x140]
+    dst = cpu.ram[0x1400:0x1440]                        # addr == RAM-Offset
+    src = cpu.ram[0x1100:0x1140]
     exp = 3 + 16 * 6 + 1       # setup(3) + 16x loop-body(6) + halt
     ok = (n == exp and dst == src
           and cpu.op_counts.get('ld.2') == 16
@@ -91,10 +91,10 @@ def test_strcpy():
     ]
     s = b"copy me!\x00"                                 # 9 Zeichen + NUL = 10 B
     cpu = ShellCPU()
-    cpu.ram[0x100:0x100 + len(s)] = s                   # 0x1100 = off 0x100
+    cpu.ram[0x1100:0x1100 + len(s)] = s                 # addr == RAM-Offset
     cpu.load_words(CODE, prog)
     n = cpu.run(prog, start=CODE)
-    dst = bytes(cpu.ram[0x500:0x500 + len(s)])          # 0x1500 = off 0x500
+    dst = bytes(cpu.ram[0x1500:0x1500 + len(s)])        # addr == RAM-Offset
     n_nul = len(s)                                       # 9 iterationen (incl. NUL)
     exp = 2 + n_nul * 6 + 1          # setup(2) + loop(6 pro byte, incl. NUL) + halt
     ok = (n == exp and dst == s and cpu.read_dst(C1) == 0
@@ -143,7 +143,7 @@ def test_popcount():
 
 
 # ---------------------------------------------------------------------------
-# 4) Unaligned Word-Load: 0xDEADBEEF bei 0x1183 (off 0x183, ungerade) schreiben,
+# 4) Unaligned Word-Load: 0xDEADBEEF bei 0x1183 (addr == RAM-Offset, ungerade) schreiben,
 #    ld.w via Basis S1=0x1180 + src2-Index 3 (byte-exakt, Harness byteweise).
 # ---------------------------------------------------------------------------
 def test_unaligned():
@@ -156,7 +156,7 @@ def test_unaligned():
         _halt(),
     ]
     cpu = ShellCPU()
-    cpu.ram[0x183:0x187] = (0xDEADBEEF).to_bytes(4, 'little')
+    cpu.ram[0x1183:0x1187] = (0xDEADBEEF).to_bytes(4, 'little')  # addr == RAM-Offset
     cpu.load_words(CODE, prog)
     n = cpu.run(prog, start=CODE)
     got = cpu.read_dst(C1)
@@ -167,7 +167,7 @@ def test_unaligned():
     return ok
 
 # ---------------------------------------------------------------------------
-# 5) strlen: "Hello, ISA World!"+NUL (18 B) auf 0x1100 (RAM-off 0x100),
+# 5) strlen: "Hello, ISA World!"+NUL (18 B) auf 0x1100 (addr == RAM-Offset),
 #    S1 = Pointer (via LDI 0x1100), Zaehler via S1-Referenz (exkl. NUL),
 #    ld.b-loop, CMP+bxx_eq (Z=1 wenn ungleich, per-Lane-Maske).
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ def test_strlen():
     C1 = 1                        # Byte-Puffer (C-Gruppe)
     s = b"Hello, ISA World!\x00"  # 15 Zeichen + NUL = 16 B
     cpu = ShellCPU()
-    cpu.ram[0x100:0x100 + len(s)] = s    # mem_addr 0x1100 = RAM-off 0x100
+    cpu.ram[0x1100:0x1100 + len(s)] = s    # addr == RAM-Offset
     prog = [
         ldi_movx_w(S1, 0x1100),                    # S1 = 0x1100 (LDI statt 2 sarithi)
         # loop:
@@ -224,10 +224,10 @@ def test_fir():
     cpu = ShellCPU()
     coef = [1, 2, 3, 4]
     samp = [5, 6, 7, 8]
-    for i, v in enumerate(coef):                          # 0x1600 = off 0x600
-        cpu.ram[0x600 + 4 * i:0x604 + 4 * i] = v.to_bytes(4, 'little')
-    for i, v in enumerate(samp):                          # 0x1640 = off 0x640
-        cpu.ram[0x640 + 4 * i:0x644 + 4 * i] = v.to_bytes(4, 'little')
+    for i, v in enumerate(coef):                          # 0x1600 == RAM-Offset
+        cpu.ram[0x1600 + 4 * i:0x1604 + 4 * i] = v.to_bytes(4, 'little')
+    for i, v in enumerate(samp):                          # 0x1640 == RAM-Offset
+        cpu.ram[0x1640 + 4 * i:0x1644 + 4 * i] = v.to_bytes(4, 'little')
     cpu.load_words(CODE, prog)
     n = cpu.run(prog, start=CODE)
     got = cpu.read_dst(C1)
@@ -263,8 +263,8 @@ def test_gf_mul():
 
     def build(a, b):
         cpu = ShellCPU()
-        cpu.ram[0x680] = a                                # addr 0x1680 = off 0x680
-        cpu.ram[0x681] = b                                # addr 0x1681 = off 0x681
+        cpu.ram[0x1680] = a                               # addr == RAM-Offset
+        cpu.ram[0x1681] = b                               # addr == RAM-Offset
         prog = [
             ldi_movx_w(S1, 0x1680),                        # S1 = 0x1680
             ldi_movx_w(S2, 0x1681),                        # S2 = 0x1681
@@ -324,10 +324,10 @@ def test_binomial():
     cpu = ShellCPU()
     numer = [10, 9, 8, 7, 6]
     denom = [1, 2, 3, 4, 5]
-    for i, v in enumerate(numer):                         # 0x16A0 = off 0x6A0
-        cpu.ram[0x6A0 + 4 * i:0x6A4 + 4 * i] = v.to_bytes(4, 'little')
-    for i, v in enumerate(denom):                         # 0x16C0 = off 0x6C0
-        cpu.ram[0x6C0 + 4 * i:0x6C4 + 4 * i] = v.to_bytes(4, 'little')
+    for i, v in enumerate(numer):                         # 0x16A0 == RAM-Offset
+        cpu.ram[0x16A0 + 4 * i:0x16A4 + 4 * i] = v.to_bytes(4, 'little')
+    for i, v in enumerate(denom):                         # 0x16C0 == RAM-Offset
+        cpu.ram[0x16C0 + 4 * i:0x16C4 + 4 * i] = v.to_bytes(4, 'little')
     cpu.load_words(CODE, prog)
     n = cpu.run(prog, start=CODE)
     got = cpu.read_dst(C1)

@@ -40,7 +40,7 @@ PERMB / BITFROB / TERNLOG / ARITH4
   - **C0-C15 ("complex", M68k-Datenregister)**: nur hier kommen **3 Operanden** her. Read-Port-Verdrahtung (3 Ports) braucht nur diese Gruppe.
   - **S0-S15 ("simple", M68k-Adressregister)**: **nur 2 Operanden** — s3 ist oft 0 oder eine Konstante. Pointer, Zähler, Adressen.
 - **Schreiben:** alle Instruktionen schreiben wahlfrei in alle 32 (DST = 5 Bit, global).
-- **Lesen:** nur aus der eigenen Gruppe (durch den Opcode deklariert).
+- **Lesen:** nur aus der eigenen Gruppe (durch die Plane deklariert).
 - **C0 = Zero-Reg, S0 = Zero-Reg:** lesen immer 0, Schreiben geht ins Nirvana.
   - **Zwei** Zero-Register, weil die src-Felder **4 Bit gruppenrelativ** sind — jede Gruppe braucht ihren eigenen Index 0. Anders nicht binär encodierbar.
 - **Decoder-Freiheit:** Der Decoder darf machen, was er will (großes Target: Register-Renaming) — bleibt aber sinnvoll in den gleichen Constraints, weil HW-Realität in die ISA leakt (Read-Port-Netzwerke sind teuer). Leck akzeptiert, *schulterzuck*.
@@ -53,19 +53,18 @@ PERMB / BITFROB / TERNLOG / ARITH4
 ## 3. Encoding: Fixed-Size 32 Bit
 
 - **32 Bit fixed size. Ja, das wird eng.** Grund, warum vom Opcode-Malen zum ISS gewechselt wurde: herausfinden, **wieviel Bits wohin** gehören.
-- **Bit 0 = compressed:** Escape-Hatch für **16-bit-Encoding** (\*viel Runtime-Code sind einfache Ops, keine Multi-Operand-Monster).
+- **Compressed-Encoding ohne Flag-Bit:** 5-Bit-Plane reserviert Plane-Codes 28-31 fuer 16-bit-Familien — kein eigenes Escape-Bit verschenkt (*viel Runtime-Code sind einfache Ops, keine Multi-Operand-Monster).
 - **WRF-Bit** (write_read_flags): steuert, ob Flags erzeugt werden (klassische ALU-Ops, egal C oder S) oder ob "darauf" gehört wird.
 - **Little-Endian** konvention. **Kein Bi-Endian** (baut einen `bswap` ein — Bi-Endian ist Unsinn). "Logisch" fängt die Op oben an, im Speicher steht compressed am Anfang (Feld- vs Byte-Ordnung getrennt denken).
 - **Ziel: Register-Felder einheitlich über alle Befehle** — feste Positionen → Decoder einfach. Beispiel-Gedanke: dst an der 16/32-Grenze, src1 in den ersten 16 Bit. Wird noch umgeschuffelt.
-- **Plane-Modell:** opcode 4 Bit = **16 Op-Planes**. Die großen 4 (permb/bitfrob/ternlog/arith4) belegen je eine ganze Plane und decken den Großteil ab; jede Plane interpretiert die restlichen Felder eigentümlich.
+- **Plane-Modell:** plane 5 Bit = **32 Op-Planes** (Codes 28-31 = compressed-16-bit-Familien). Die großen 4 (permb/bitfrob/ternlog/arith4) belegen je eine ganze Plane und decken den Großteil ab; jede Plane interpretiert die restlichen Felder eigentümlich.
 
 ### Beispiel-Entwurf (PAPIER, NICHT final) — ternlog
 
 ```c
 struct ISAOpTernlog {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF
-  Uint32_t opcode: 4;          // 29-26  Op-Plane
+  Uint32_t write_read_flags: 1;// 31  WRF
+  Uint32_t plane: 5;           // 30-26  Op-Plane
   Uint32_t csrc3: 4;           // 25-22  C-Gruppe (Rotation: src3 oben)
   Uint32_t dst: 5;             // 21-17  alle 32 schreibbar
   Uint32_t csrc1: 4;           // 16-13  C-Gruppe
@@ -82,9 +81,8 @@ struct ISAOpTernlog {
 
 ```c
 struct ISAOpPermb_A {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF
-  Uint32_t opcode: 4;          // 29-26  Op-Plane
+  Uint32_t write_read_flags: 1;// 31  WRF
+  Uint32_t plane: 5;           // 30-26  Op-Plane
   Uint32_t csrc3: 4;           // 25-22  C-Gruppe (Rotation)
   Uint32_t dst: 5;             // 21-17
   Uint32_t csrc1: 4;           // 16-13  C-Gruppe
@@ -104,9 +102,8 @@ Die Shift-Steuerung (Varianten-Kommentare oben: `shift_mode`/`right_left`) wande
 
 ```c
 struct ISAOpPermb_B {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF
-  Uint32_t opcode: 4;          // 29-26  Op-Plane
+  Uint32_t write_read_flags: 1;// 31  WRF
+  Uint32_t plane: 5;           // 30-26  Op-Plane
   Uint32_t csrc3: 4;           // 25-22  C-Gruppe (Rotation)
   Uint32_t dst: 5;             // 21-17
   Uint32_t csrc1: 4;           // 16-13  C-Gruppe
@@ -125,9 +122,8 @@ struct ISAOpPermb_B {
 
 ```c
 struct ISAOpBitfrob {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF
-  Uint32_t opcode: 4;          // 29-26  Op-Plane
+  Uint32_t write_read_flags: 1;// 31  WRF
+  Uint32_t plane: 5;           // 30-26  Op-Plane
   Uint32_t csrc3: 4;           // 25-22  C-Gruppe (Rotation)
   Uint32_t dst: 5;             // 21-17
   Uint32_t csrc1: 4;           // 16-13  C-Gruppe
@@ -142,7 +138,7 @@ struct ISAOpBitfrob {
 
 - **cst_pool_flag JA** — bitfrob-Modi tragen häufig konstant-artige Operanden (pext/pdep-Maske, Shift-Amount, POLY_RED-Index): Pool spart Register + Load. Feste Lage (Bit 8) wie ternlog/permb = einheitliche Feldposition über Planes.
 - `inv_src1/2/3` = exakt die bitfrob-inv-Bits aus dem ISS (orthogonale Invertierbarkeit, anders als ternlog).
-- Summe: 1+1+4+5+4+4+4+1+1+1+1+5 = **32 ✓**
+- Summe: 1+5+5+4+4+4+1+1+1+1+5 = **32 ✓**
 - **mode:5 = randvoll** (31 ISS-Modi) — **LÖSUNG: Helper-Aussortierung, siehe nächste Notiz.**
 
 ### bitfrob: User-facing vs interne Helper + 2-Op-Split (Klassifikation)
@@ -170,9 +166,8 @@ sbitfrobi   = dito                         ┴ i-Suffix-Versionen
 
 ```c
 struct ISAOpArith4 {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF
-  Uint32_t opcode: 4;          // 29-26  Op-Plane
+  Uint32_t write_read_flags: 1;// 31  WRF
+  Uint32_t plane: 5;           // 30-26  Op-Plane
   Uint32_t csrc3: 4;           // 25-22  C-Gruppe (Rotation)
   Uint32_t dst: 5;             // 21-17
   Uint32_t csrc1: 4;           // 16-13  C-Gruppe
@@ -189,14 +184,14 @@ struct ISAOpArith4 {
 - **Mehrere arith4-Planen:** `scalar-arith / packed-arith / float-arith` — je eigene Plane, je eigener 5-Bit-Mode-Raum (32 pro Plane; heute 26 belegt in einer). Deckt "packed in allen Breiten" ohne op_type-Verschachtelung pro Mode.
 - Falls je >32 Modi in EINER Plane nötig: zweite arith4-Plane, nicht das gemeinsame Layout verbiegen.
 - `negate_src1/2/3` = die arith4-inv-Bits aus dem ISS.
-- Summe: 1+1+4+5+4+4+4+1+1+1+1+5 = **32 ✓**
+- Summe: 1+5+5+4+4+4+1+1+1+1+5 = **32 ✓**
 
 ### Feld-Rotation (Entscheidung: src3 oben)
 
 Alle vier Register-Felder **rotieren**: `src3` sitzt oben (25-22), darunter `dst` (21-17), `src1` (16-13), `src2` (12-9). Reine Umsortierung — 4+5+4+4 = 17 Bit, **Bit-Kosten 0**.
 
 ```
-31 C · 30 WRF · 29-26 opcode · 25-22 src3 · 21-17 dst · 16-13 src1 · 12-9 src2 · 8 cst_pool · 7-0 imm/mode
+31 WRF · 30-26 plane · 25-22 src3 · 21-17 dst · 16-13 src1 · 12-9 src2 · 8 cst_pool · 7-0 imm/mode
 ```
 
 **Gewinn:** Befehle ohne src3 (2-Operanden) haben oben **25-22 = 4 freie Bits**:
@@ -204,18 +199,18 @@ Alle vier Register-Felder **rotieren**: `src3` sitzt oben (25-22), darunter `dst
 - **sarith** (S-Pfad, 2 Operanden) hat den Slot **immer** frei → **12-Bit-Immediate** (25-22 + 7-0) = HIMM-Grundgerüst
 - Gilt auch für ternlog-2-Op / permb-Shift-Varianten ohne src3
 
-**Erhalten:** `dst`-Lage über Planes einheitlich (21-17), `cst_pool_flag` auf Bit 8, `opcode` auf 29-26 — Decoder-Ziel unversehrt. src3 = "mietfreier Slot" für Opcode-/Immediate-Erweiterung.
+**Erhalten:** `dst`-Lage über Planes einheitlich (21-17), `cst_pool_flag` auf Bit 8, `plane` auf 30-26, WRF auf 31 — Decoder-Ziel unversehrt. src3 = "mietfreier Slot" für Opcode-/Immediate-Erweiterung.
 
 ### Die LDI-Plane (PAPIER, NICHT final) — Load Immediate, v2 (F-Dispatch, Merge-scaled)
 
-Nur `dst` (+ C/WRF/opcode aus dem festen Muster); **alle übrigen Bits für die Konstante**. Eine Plane, Form-Bit-Dispatch (MOVX + MASK). Plane-Slot: einer der freien Nummern.
+Nur `dst` (+ WRF/plane aus dem festen Muster); **alle übrigen Bits für die Konstante**. Eine Plane, Form-Bit-Dispatch (MOVX + MASK). Plane-Slot: einer der freien Nummern.
 
-**Header-Merge-Entscheidung (Hinweis):** compressed-Bit wird mit dem Opcode-Feld zu **5-Bit-Plane (32 Planes)** verschmolzen; Plane-Codes 28-31 = compressed-16-bit-Familien (eigene Formate via Plane-Code). Header-Kosten bleiben 6 Bit (vorher C+WRF+op4) — nur monotone Umsortierung, bestehende Feldpositionen unberührt. Mehr Plane-Reserve (z.B. MemOp-signext/zeroext-Split zahlbar), compressed = eigenständige Familien statt Flag.
+**Header-Merge-Entscheidung (final):** WRF oben (Bit 31), plane 30-26 — alte Opcode-Werte = Plane-Codes (Bit 30 = 0); Plane-Codes 28-31 = compressed-16-bit-Familien (eigene Formate via Plane-Code). Header-Kosten bleiben 6 Bit (vorher C+WRF+op4, jetzt WRF+plane5). Mehr Plane-Reserve (z.B. MemOp-signext/zeroext-Split zahlbar), compressed = eigenständige Familien statt Flag.
 
 ```c
 struct ISAOpLDI {
-  Uint32_t plane: 5;           // 31-27  32 Planes (compressed verschmolzen)
-  Uint32_t write_read_flags: 1;// 26     WRF: 0 = zero-fill, 1 = merge
+  Uint32_t write_read_flags: 1;// 31     WRF: 0 = zero-fill, 1 = merge
+  Uint32_t plane: 5;           // 30-26  32 Planes (compressed verschmolzen)
   Uint32_t dst: 5;             // 25-21  alle 32 schreibbar
   Uint32_t form: 1;            // 20     F: 0 = MOVX, 1 = MASK
   Uint32_t imm: 20;            // 19-0   Konstante (Form-abhängig)
@@ -259,7 +254,7 @@ Uint32_t frei: 6;              // 5-0    Reserve (FP-Konstanten?, Skalierung)
 S-Gruppen-Versionen der 4 Pfeiler (M68k-A-Register-Linie): **2 Operanden, kein src3**. **Kollaps:** die ehemaligen src3-Bits (25-22) werden **+4 Opcode-Bits** → eine S-Plane trägt **16 Befehlsslots** statt 4 Cousin-Schubladen.
 
 ```
-31 C · 30 WRF · 29-26 opcode (S-Plane) · 25-22 subop (16 Slots) · 21-17 dst · 16-13 ssrc1 · 12-9 ssrc2 | imm_hi · 8-0 imm_lo/mode
+31 WRF · 30-26 plane (S-Plane) · 25-22 subop (16 Slots) · 21-17 dst · 16-13 ssrc1 · 12-9 ssrc2 | imm_hi · 8-0 imm_lo/mode
 ```
 
 **8 von 16 Sub-Slots belegt, 8 frei:**
@@ -280,9 +275,8 @@ S-Gruppen-Versionen der 4 Pfeiler (M68k-A-Register-Linie): **2 Operanden, kein s
 
 ```c
 struct ISAOpControl {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF
-  Uint32_t opcode: 4;          // 29-26  Op-Plane (Control)
+  Uint32_t write_read_flags: 1;// 31  WRF
+  Uint32_t plane: 5;           // 30-26  Op-Plane (Control)
   Uint32_t scale: 2;           // 25-24  Offset-Scale (1/2/4/8)
   Uint32_t offset_high: 2;     // 23-22  Offset high (11 Bit signed gesamt)
   Uint32_t dst_mask: 5;        // 21-17  WRF=0: Link (alle 32); WRF=1: Flagmaske
@@ -294,12 +288,12 @@ struct ISAOpControl {
 
 - **Eine Op deckt die ganze Sprung-Welt:** WRF=0 + dst=Link → bra/brl (Branch-and-Link, PC→DST); WRF=1 + dst=Flagmaske → bxx (bedingt); `src1`=PC → PC-relative; `src1`=A-Reg + `src2`=Index → **Register-Offset-Sprung** (Jump-Tabellen).
 - **Offset = 11 Bit signed in 2-Byte-Einheiten << scale** → **±2K / ±4K / ±8K / ±16K**. Gewinn gegenüber flachem 13-Bit-Offset (±4K fix): Befehle sind immer gerade ausgerichtet (32-bit UND 16-bit compressed, beide 2-Byte-vielfach) → Bit 0 implizit 0 = 1 Bit geschenkt (M68k/RISC-V-Präzedenz, RISC-V-JAL: 21 Bit in 2-Byte-Einheiten = ±1 MB); Scale-Multiplikator = ARM85-rotated-Geist (Imm<<Shift). **Die 2 geklauten Scale-Bits kommen doppelt zurück.**
-- **Plane-JA:** 16 Planes-Budget: 4 Pfeiler + 4 Cousins + Control + Memory + System/MSR + AMOD ≈ 11-13 → Luft bleibt. Control zahlt sich als "eine Op statt Familie" aus.
+- **Plane-JA:** 32 Planes-Budget (Codes 16-27 frei, 28-31 compressed): 4 Pfeiler + 4 Cousins + Control + Memory + System/MSR + AMOD ≈ 11-13 → Luft bleibt. Control zahlt sich als "eine Op statt Familie" aus.
 - **Patente: bedenkenlos.** `Base + Index<<scale + Offset` = M68k `d16(An,Xi)` (1979, prior art); ARM-rotated-imm = original ARM 1985 (längst abgelaufen). Eigene Bit-Kodierung ohnehin → kein Angriffspunkt.
 - **Scale-Frage GELÖST:** 2 Bit Scale (25-24) + 11-Bit-Offset in 2-Byte-Einheiten — M68k/RISC-V-Ausrichtungs-Trick macht es zum Netto-Gewinn.
 - **SAT-verifiziert (pipeline_smt.py M23, Q123-Q125, Lemmas R_FMEM_OFF/R_FMEM_FIELDS/R_CMPRANGE):** FMEM-Offset 11-Bit-signed `<< (1+scale)` spannt **[-16384, 16368] Bytes**; Register-Felder disjunkt, dst(21-17)/src1(16-13)/src2(12-9) == F3-Struktur (Decoder-Konsistenz bewiesen). Typische Ziele (512/1K/2K/4K/8K) erreichbar, **16384 ist NICHT darstellbar** (16368 max bei scale=3) → globale Sprünge via Register-Offset/`loadpcoff`-Idiom nötig. Compressed 16-bit-Offset: ±510 Bytes (R_CMPRANGE).
 - **bxx-Praedikat-Fabriken (M24, Q126-Q128, Lemma R_BCOND_NOW):** Bedingte indirekte Sprünge existieren praktisch nicht (Compiler baut sie nicht) → src1+src2 werden Bedingungs-Logik. **XOR-Substitutions-Modell (final, User-Entscheidung):** 4 Bedingungs-Kanäle = rohe Flags; **src1[3:2] wählt einen Kanal p, der durch XOR-Signal ersetzt wird; src1[1:0] wählt Paar (S⊕O / C⊕Z / S⊕Z / C⊕O)**. dst = Maske (welche Kanäle), src2 = Soll-Zustand, dst[4] = inv any|all. **SAT-Ergebnis: 14/14 ARM-Bedingungen abgedeckt (EQ/NE/CS/CC/MI/PL/VS/VC/HI/LS/GE/LT/GT/LE)** — LE via Maske{X,Z} Soll 1,1 any (Z ∨ S≠O). Zählung: 290 distinkte Bedingungsfunktionen (288 nichttrivial, von 8192 Tupeln). Decoder-Kosten: 1 Mux + 4 XOR-Kandidatengatter ≈ 8 LUTs. **In Shell eingebaut (isa_shell.py: bxx_w-Helper, _exec_ctrl); Konsequenz: bxx adressiert rein PC-relativ (Basis=pc, Index=0)** — src1/src2 sind Bedingungs-Encoding, keine Basis/Index mehr (bra/brl behalten Register-Basis/Index für Tabellen-Sprünge).
-- Summe: 1+1+4+2+2+5+4+4+9 = **32 ✓**
+- Summe: 1+5+2+2+5+4+4+9 = **32 ✓**
 
 ### Die Memory-Plane (PAPIER, NICHT final, temporär)
 
@@ -307,9 +301,8 @@ Control-Layout übernommen. **Scale = Zugriffsbreite** (nicht nur Offset-Skalier
 
 ```c
 struct ISAOpMemory {
-  Uint32_t compressed: 1;      // 31  Escape für 16-bit
-  Uint32_t write_read_flags: 1;// 30  WRF=0 → Load, WRF=1 → Store
-  Uint32_t opcode: 4;          // 29-26  Op-Plane (Memory)
+  Uint32_t write_read_flags: 1;// 31  WRF=0 → Load, WRF=1 → Store
+  Uint32_t plane: 5;           // 30-26  Op-Plane (Memory)
   Uint32_t scale: 2;           // 25-24  Breite: 1=byte, 2=half, 4=word, 8=dword
   Uint32_t offset_high: 2;     // 23-22  Offset high (11 Bit signed gesamt)
   Uint32_t dst: 5;             // 21-17  Load: Ziel (alle 32) / Store: Datenquelle
@@ -325,7 +318,7 @@ struct ISAOpMemory {
 - **Unaligned-Pflicht bleibt:** eingebetteter Offset breiten-skaliert (aligned); **Basis+Index byte-genau** → unaligned via Register-Wege.
 - **dword in 32-bit-ISA:** Register-Pair (lo+hi in 2 Regs) — offen, Frage notiert.
 - **OFFEN — sign/zero-Erweiterung** bei byte/half-Loads (LB/LBU-Problem): braucht 1 Bit, noch kein Platz. Nicht über-entschieden.
-- Summe: 1+1+4+2+2+5+4+4+9 = **32 ✓**
+- Summe: 1+5+2+2+5+4+4+9 = **32 ✓**
 
 ### Op-Arten (arith4 als Beispiel — ISA-Opcode-Struktur)
 
@@ -367,7 +360,7 @@ Wir haben mehr als `or %g0` — die Zero-Register C0/S0 sind Pseudo-Op-Fabrik UN
 - Idee: MSR-Raum, **für jeden lesbar** (nicht Ring-0-privilegiert — Anti-PPC/SPARC/MIPS, die stecken das in ein nur-Ring0-lesbares Processor Status Word).
 - **Öffentlich lesbar sollen sein:** PC (PC-relative Adressierung), FLAGS, ein **cycle-counter**, IDENT/Feature-Register (falls ggf. Erweiterungsflags; dynamischer Dispatch: "hast du Altivec?", "Popcnt-Implementierung gut?").
 - **writemsr** wird technisch nötig (OS-Spezialkram: Task-ID, Process-Page-Table-Root-Pointer, …).
-- **Faltung in ld/st:** MSR = **pseudo-memory-mapped IO** im Adressraum — eine reservierte "nicht echte" Region. CPU fängt die Adresse ab und biegt auf MSR-Register/ROM um. Also **kein eigener loadmsr-opcode**, alles ist ld/st. HW-Notiz: die Region muss vor Cache/L2 abgefangen werden.
+- **Faltung in ld/st:** MSR = **pseudo-memory-mapped IO** im Adressraum — eine reservierte "nicht echte" Region. CPU fängt die Adresse ab und biegt auf MSR-Register/ROM um. Also **kein eigener loadmsr-opcode**, alles ist ld/st. HW-Notiz: die Region muss vor Cache/L2 abgefangen werden. **Platzierung: Top des Adressraums** (Reset-Vektor = letztes Wort) — `ld dst, (zero), negativ` reicht ohne weites Immediate; Bottom (0x0) bleibt frei für Vektor-Tabellen.
 - **Konstanten-Whopper:** In Instruktionen sind nur **16 Konstanten** ansprechbar (ARITH_CST/cst_table), aber der MSR-Weg kann das **ganze ISA-Konstanten-ROM** öffnen ("warum ein Geheimnis daraus machen, außer hochgradig Proprietäres? Lass den User mit ternlog die Bitfrob-Konstanten nutzen — warum verbauen?").
 - **Decoder-intern ≠ User-Zugriff (Schichtung):** Intern braucht der Decoder viele Konstanten (BITFROB_CST, POLY_RED-ROM, evtl. Reziprok-ROM/Newton) — **aber das ist Implementierungs-Detail**. Der User spricht die Poly-Tabelle nie selbst an; **ein in der ISA ausgewählter Mode** wählt intern die passende Konstante (`cst_table`/`src3_idx`-Slot). User-Sicht: `#MODE + optional 1/16-Pool-Index`, nicht "ROM-Zelle 0x11B". → **Kein doppeltes Konstanten-Immediate im Encoding nötig**: intern reich, ISA dünn = Feature (weniger Bits, klarer Modus). Der MSR-ROM-Zugriff bleibt öffentlich, aber exotisch (Nicht-Alltagspfad).
 - **Konstanten-Direktzugriff bleibt in den Ops** (cst_table/src3_idx) — das ist der Schnellpfad, ohne ld, ohne Register-Allokation.
@@ -505,7 +498,7 @@ Für jede Gruppe eine Vergleichs-Tabelle anlegen (x86 / ARM / RISC-V / M68k / PP
 
 ## 11. ISA-Shell (isa_shell.py) — erste Decoder-Realitaet + Funde
 
-Rumpf-Pipeline um den Kern: PC + RF (C/S-Gruppen, Zero-Regs) + RAM 64K + MSR-pseudo-MMIO (Vektor an 0x0, IDENT/FLAGS/PC/CYCLE) + Decoder fuer die Papier-Formen. Kern-Aufruf: `execute_pipeline` mit arith4-rechnend (prev_in_strobe=0), 3 Stufen bypass (`prev_in_strobe=8`, helpers.py-Muster). Assembler-Helper `carith_w/sarith_w/sarithi_w/ctrl_w/mem_w` bauen 32-Bit-Woerter aus den Lexikon-Formen. Smoke-Programm (Summe 1..10 via ld/carith/sarith/CMP/bxx/bra/st): **PASS**, 76 Instruktionen, op_counts = erster Trace-Zaehler.
+Rumpf-Pipeline um den Kern: PC + RF (C/S-Gruppen, Zero-Regs) + RAM 64K + MSR-pseudo-MMIO am Adressraum-Top (Vektor = letztes Wort 0xFFFFFFFC, IDENT/FLAGS/PC/CYCLE abwärts) + Decoder fuer die Papier-Formen. Kern-Aufruf: `execute_pipeline` mit arith4-rechnend (prev_in_strobe=0), 3 Stufen bypass (`prev_in_strobe=8`, helpers.py-Muster). Assembler-Helper `carith_w/sarith_w/sarithi_w/ctrl_w/mem_w` bauen 32-Bit-Woerter aus den Lexikon-Formen. Smoke-Programm (Summe 1..10 via ld/carith/sarith/CMP/bxx/bra/st): **PASS**, 76 Instruktionen, op_counts = erster Trace-Zaehler.
 
 **F1/sarithi Encoding GELOEST (F1-imm13-Finalisierung):**
 - **sarithi (F1, sub 0x8/0x9):** imm13 = `[val(9, sign-extended) | shift(4)]` → Operand = `val << shift`. val9 im Bereich ±256, shift 0..15: 0x1000 = `4<<10`, 0x800 = `1<<11`. Große Konstanten → LDI (2 Ops) + sarith. Helper-Signatur `sarithi_w(sub, mode, dst, s1, val, shift=0)`.
@@ -520,7 +513,7 @@ Rumpf-Pipeline um den Kern: PC + RF (C/S-Gruppen, Zero-Regs) + RAM 64K + MSR-pse
 3. **Imm13 signed (max 4095) erreicht RAM-Basen > 0xFFF nicht** — Pointer-Basis braucht 2 Adds oder ADDSHIFT. Imm-Bereich ist ein echtes Encoding-Limit (Kandidat fuer die SAT-Offset-Frage). **ENTSCHEIDUNG: Long-Jump-Plane verworfen (erstmal), Idiom akzeptiert:** `load pc → arith (off addieren) → bra/brl mit src1=Base` (3 Ops, PC-relative Basis via src1==0-Sonderfall).
 4. **Branch-Offsets PC-basiert** (RISC-V-Stil, nicht PC+4): assembler-seitig konsistent halten.
 5. **Selbst-Branch (bra .) = Halt-Idiom** (µC-artig) — Simulator erkennt es als Halt.
-6. **Layout-Kollisionen lehrreich:** MSR-Region 0x0-0xFFF + RAM-Basis = Daten koennen nicht unter 0x1000 liegen; Code/Daten-Platzierung via load_words-offset (MSR_END).
+6. **Layout-Kollisionen lehrreich:** MSR-Region **am Top** (0xFFFFF000-0xFFFFFFFF, Reset-Vektor = letztes Wort) — erreichbar via `ld` mit Zero-Reg + negativem Offset; RAM flach ab 0x0 (Adresse == RAM-Offset); Bottom (0x0 abwaerts-frei) reserviert fuer Vektor-Tabellen.
 
 **bxx-Semantik GELOEST (CMP-Swap-Trick):** `(flags & mask) != 0` reicht — die Negation kommt aus dem CMP, nicht dem Branch (RISC-V-Stil). `bne` = CMP-Operanden swappen (`CMP b,a`) + `bxx Z`. Deckt alle Bedingungen (Z=gleich, S=negativ, C=carry, O=overflow), kein Invert-Bit noetig, ISA-dünn.
 

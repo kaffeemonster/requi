@@ -3469,7 +3469,7 @@ def _run_M23():
         assert _r == z3.unsat, f"Q124 F3-{_n}: {_r}"
     print("Q124 FMEM Feld-Disjunktheit + F3-Konsistenz PASS")
 
-    # Q125: compressed-Ausblick (Bit 31 C gesetzt -> 16-bit-Form). Offset nur
+    # Q125: compressed-Ausblick (Plane-Code 28-31 -> 16-bit-Form). Offset nur
     # noch ~8-9 Bit in 2-Byte-Einheiten: offs 9-bit signed -> max +255
     # Einheiten = 510 Bytes, min -256 Einheiten = -512 Bytes. Notiz-Query.
     print("Q125 FMEM: compressed-16-bit-Bereich (+/-255 Einheiten = +/-510 Bytes)")
