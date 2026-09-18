@@ -329,6 +329,22 @@ def ldi_mask_w(dst, ones, rep, rot, inv=False, wrf=False):
     return w
 
 
+def bitrev_bam(dst, idx, base, n):
+    """BITREV_BAM (Makro, FFT-Adressgenerierung): dst = base | reverse-low-N(idx).
+    reverse-low-N(x) = BITREV8(x) >> (8-n); idx und base sind C-Register
+    (bitfrob/ternlog lesen die C-Gruppe). Vorbedingung: idx < 2^n und base in
+    den unteren n Bit = 0 (aligned) -> OR ist ein sauberer Merge.
+    Zersetzung (2-3 Instr): BITREV8 + cbitfrob_i LSR#(8-n) + ternlog OR.
+    Fuer n>8 waere zusaetzlich Byte-Reverse (permb) noetig (nicht abgedeckt)."""
+    if not 0 <= n <= 8:
+        raise ValueError("bitrev_bam: n muss 0..8 sein")
+    seq = [bitfrob_w(BitFrobMode.BITREV8, dst, idx, 0)]
+    if n < 8:
+        seq.append(cbitfrob_i_w(BitFrobMode.LSR, dst, dst, 8 - n))
+    seq.append(ternlog_w(TernLut.OR, dst, dst, base, 0))
+    return seq
+
+
 def bxx_w(mask, wish, chan, pair, offs, scale=0, inv=False, neg=False):
     """bxx: mask=4-Bit-Flagmaske, wish=4-Bit-Soll, chan=Ersatz-Kanal (0-3),
     pair=Paar (0:S^O,1:C^Z,2:S^Z,3:C^O), inv=any/all. src1=(chan<<2)|pair.

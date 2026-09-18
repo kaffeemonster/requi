@@ -13,13 +13,14 @@ Encoding-Notizen (isa_shell.py):
   - Offsets: PC-basiert, 2-Byte-Einheiten, offs = (target_pc - branch_pc) // 2.
 """
 import sys
+import math
 
 sys.path.insert(0, '/home/redbully/ecpu/requi/wayfinder/pipeline_ops')
 
 from isa_shell import (
     ShellCPU, carith_w, sarith_w, sarithi_w, ctrl_w, mem_w, bitfrob_w, bxx_w,
     bxx_ne, bxx_eq, ternlog_w, ldi_movx_w, ldi_mask_w, slogii_w,
-    cbitfrob_i_w,
+    cbitfrob_i_w, bitrev_bam,
 )
 from pipeline import ArithMode, BitFrobMode, TernLut, FLAG_S, OpType
 
@@ -446,10 +447,304 @@ def test_cbitfrob_i():
     return ok
 
 
+def test_goertzel():
+    """Goertzel (1-Frequenz-Filter, DSP-Kernel): q0 = (coeff*q1 >> 14) - q2 + sample.
+    Kern-Bedarf: MUL32 + cbitfrob_i LSR#14 + Sub (ADD+inv2) + ADD.
+    N=8 Samples, coeff = round(2*cos(pi/4)*2^14) = 23170 (Bin k=1 bei N=8).
+    Nach Loop zusaetzlich Magnitude^2 = q1^2 + q2^2 - ((coeff*q1)>>14)*q2."""
+    S1, S2 = 17, 18
+    C1, C2, C3, C4, C5, C6 = 1, 2, 3, 4, 5, 6
+    COEFF = 23170
+    samples = [1000, 707, 0, -707, -1000, -707, 0, 707]
+    N = len(samples)
+    prog = [
+        ldi_movx_w(C1, COEFF),                        # C1 = coeff
+        ldi_movx_w(S1, 0x1100),                       # S1 = &samples
+        sarithi_w(0x8, ArithMode.ADD, S2, 0, N),      # S2 = N
+        ldi_movx_w(C2, 0),                            # q1 = 0
+        ldi_movx_w(C3, 0),                            # q2 = 0
+        # loop:
+        mem_w(C5, 1, 0, 0, 2),                        # C5 = sample
+        carith_w(ArithMode.MUL32, C4, C1, C2),        # C4 = coeff*q1 (lo)
+        cbitfrob_i_w(BitFrobMode.LSR, C4, C4, 14),    # C4 >>= 14
+        carith_w(ArithMode.ADD, C4, C4, C5, s3=C3, inv3=True),  # q0 = prod + sample - q2 (1 Op: 3-Input + inv3)
+        ternlog_w(TernLut.MOV_A, C3, C2, 0),           # q2 = q1
+        ternlog_w(TernLut.MOV_A, C2, C4, 0),           # q1 = q0
+        sarithi_w(0x8, ArithMode.ADD, S1, 1, 4),      # ptr += 4
+        sarithi_w(0x8, ArithMode.ADD, S2, 2, -1, wrf=True),  # cnt -= 1 (Z bei 0)
+        bxx_ne(-16),                                  # cnt != 0 -> loop
+        # magnitude^2:
+        carith_w(ArithMode.MUL32, C6, C1, C2),        # C6 = coeff*q1
+        cbitfrob_i_w(BitFrobMode.LSR, C6, C6, 14),    # C6 >>= 14
+        carith_w(ArithMode.MUL32, C4, C2, C2),        # C4 = q1^2
+        carith_w(ArithMode.MUL32, C5, C3, C3),        # C5 = q2^2
+        carith_w(ArithMode.MUL32, C6, C6, C3),        # C6 = t*q2
+        carith_w(ArithMode.ADD, C4, C4, C5, s3=C6, inv3=True),  # mag2 = q1^2+q2^2 - t*q2 (1 Op)
+        _halt(),
+    ]
+    cpu = ShellCPU()
+    for i, v in enumerate(samples):                       # 0x1100 == RAM-Offset
+        cpu.ram[0x1100 + 4 * i:0x1104 + 4 * i] = (v & 0xFFFFFFFF).to_bytes(4, 'little')
+    cpu.load_words(CODE, prog)
+    n = cpu.run(prog, start=CODE)
+    M = 0xFFFFFFFF                                        # Referenz: exakte ISA-Semantik
+    q1 = q2 = 0
+    for v in samples:
+        prod = ((COEFF * q1) & M) >> 14                   # MUL32-lo + LSR
+        q0 = (prod - q2 + (v & M)) & M                    # Sub (inv2) + Add, 32-Bit-Wrap
+        q2 = q1
+        q1 = q0
+    t = ((COEFF * q1) & M) >> 14
+    ref_mag2 = (((q1 * q1) & M) + ((q2 * q2) & M) - ((t * q2) & M)) & M
+    exp_instr = 5 + N * 9 + 6 + 1      # setup + N*loop(9) + mag(6) + halt
+    got_q1, got_q2, got_mag2 = cpu.read_dst(C2), cpu.read_dst(C3), cpu.read_dst(C4)
+    ok = (n == exp_instr and got_q1 == q1 and got_q2 == q2 and got_mag2 == ref_mag2
+          and cpu.op_counts.get('carith:MUL32') == N + 4)
+    print(f"[12] Goertzel: N={N} coeff={COEFF} | q1=0x{got_q1:08x}(exp 0x{q1:08x}) "
+          f"q2=0x{got_q2:08x}(exp 0x{q2:08x}) mag2=0x{got_mag2:08x}(exp 0x{ref_mag2:08x}), "
+          f"instr={n} (exp {exp_instr})")
+    print("    ->", "PASS" if ok else "FAIL")
+    return ok
+
+
+def test_bitrev_bam():
+    """BITREV_BAM (Test 13): base | reverse-low-N(idx), FFT-Adressgenerierung.
+    n=3, idx 0..7 -> base | rev3(idx). Makro = BITREV8 + LSR#5 + OR (3 Instr)."""
+    BASE = 0x1100
+    n = 3
+    C2 = 2                                    # base
+    IDX = [3, 4, 5, 6, 7, 8, 9, 10]           # idx-Register (werden zu Ergebnis)
+    prog = [ldi_movx_w(C2, BASE)]
+    for i, r in enumerate(IDX):
+        prog.append(ldi_movx_w(r, i))                     # idx = i
+    for r in IDX:
+        prog += bitrev_bam(r, r, C2, n)                   # r = base | rev3(idx)
+    prog.append(_halt())
+    cpu = ShellCPU()
+    cpu.load_words(CODE, prog)
+    n_instr = cpu.run(prog, start=CODE)
+    exp = [BASE | int(bin(i)[2:].zfill(n)[::-1], 2) for i in range(8)]
+    got = [cpu.read_dst(r) for r in IDX]
+    ok = (n_instr == len(prog) and got == exp)
+    print(f"[13] BITREV_BAM (n={n}, base=0x{BASE:04x}): got={[hex(g) for g in got]}")
+    print(f"     exp={[hex(e) for e in exp]}, instr={n_instr} (exp {len(prog)})")
+    print("    ->", "PASS" if ok else "FAIL")
+    return ok
+
+
+def test_fft8():
+    """FFT-8 (Test 14): radix-2 DIT complex, unrolled (291 Instr).
+    Eingabe via BITREV_BAM bit-reversed permutiert, dann 3 Butterfly-Stages;
+    Q14-Twiddles, Complex-Mult = 4x MUL32 + 2x ADD(inv3), >>14 via ASR (signed).
+    Referenz = identische ISA-Semantik (exakte Integer); zusaetzlich gegen
+    float-DFT auf <1 LSB geprueft. Codes @0x1080, Daten X@0x3000, A@0x3100."""
+    XB, AB = 0x3000, 0x3100
+    S1, S2, S3 = 17, 18, 19
+    F1, F2, F3 = 1, 2, 3
+    U1R, U1I, U2R, U2I = 1, 2, 3, 4
+    VR, VI, WR, WI = 5, 6, 7, 8
+    T1, T2, T3, T4, SR, SI = 9, 10, 11, 12, 13, 14
+    C_I, C_T = 13, 14
+    W1, W2, W3 = (11585, -11585), (0, -16384), (-11585, -11585)
+    MASK = 0xFFFFFFFF
+
+    def rev3(i):
+        return int(bin(i)[2:].zfill(3)[::-1], 2)
+
+    def ldi(reg, val):
+        return ldi_movx_w(reg, val & 0xFFFF, sext=(val < 0))
+
+    def ld(reg, off):
+        return mem_w(reg, F2, 0, off, 2)              # base = A
+
+    def st(reg, off):
+        return mem_w(reg, F2, 0, off, 2, wrf=True)
+
+    def bfly(prog, p, q, W):
+        prog += [ld(U1R, p * 2), ld(U1I, p * 2 + 1), ld(U2R, q * 2), ld(U2I, q * 2 + 1)]
+        if W is None:
+            prog += [ternlog_w(TernLut.MOV_A, VR, U2R, 0),
+                     ternlog_w(TernLut.MOV_A, VI, U2I, 0)]
+        else:
+            wr, wi = W
+            prog += [
+                ldi(WR, wr), ldi(WI, wi),
+                carith_w(ArithMode.MUL32, T1, U2R, WR),
+                carith_w(ArithMode.MUL32, T2, U2I, WI),
+                carith_w(ArithMode.ADD, VR, T1, 0, s3=T2, inv3=True),  # u2r*wr - u2i*wi
+                cbitfrob_i_w(BitFrobMode.ASR, VR, VR, 14),
+                carith_w(ArithMode.MUL32, T3, U2R, WI),
+                carith_w(ArithMode.MUL32, T4, U2I, WR),
+                carith_w(ArithMode.ADD, VI, T3, T4),                   # u2r*wi + u2i*wr
+                cbitfrob_i_w(BitFrobMode.ASR, VI, VI, 14),
+            ]
+        prog += [
+            carith_w(ArithMode.ADD, SR, U1R, VR), st(SR, p * 2),
+            carith_w(ArithMode.ADD, SI, U1I, VI), st(SI, p * 2 + 1),
+            carith_w(ArithMode.ADD, SR, U1R, VR, inv2=True), st(SR, q * 2),
+            carith_w(ArithMode.ADD, SI, U1I, VI, inv2=True), st(SI, q * 2 + 1),
+        ]
+
+    prog = [ldi_movx_w(S1, XB), ldi_movx_w(S2, AB)]
+    for k in range(8):                                # Permutation A[k]=X[rev3(k)]
+        prog.append(ldi_movx_w(C_I, k))
+        prog += bitrev_bam(C_T, C_I, 0, 3)            # C_T = rev3(k)
+        prog.append(cbitfrob_i_w(BitFrobMode.LSL, C_T, C_T, 3))
+        prog.append(ternlog_w(TernLut.MOV_A, S3, C_T, 0))
+        prog += [mem_w(U1R, F1, F3, 0, 2), mem_w(U1I, F1, F3, 1, 2),
+                 st(U1R, k * 2), st(U1I, k * 2 + 1)]
+    for b in (0, 2, 4, 6):                            # Stage 1 (W=1)
+        bfly(prog, b, b + 1, None)
+    for b in (0, 4):                                  # Stage 2 (W8^0, W8^2)
+        bfly(prog, b, b + 2, None)
+        bfly(prog, b + 1, b + 3, W2)
+    bfly(prog, 0, 4, None)                            # Stage 3 (W8^0..3)
+    bfly(prog, 1, 5, W1)
+    bfly(prog, 2, 6, W2)
+    bfly(prog, 3, 7, W3)
+    prog.append(_halt())
+
+    inp = [(1, 0), (2, -1), (0, 3), (-2, 1), (4, 0), (1, 1), (-3, 2), (0, -1)]
+    cpu = ShellCPU()
+    for i, (re, im) in enumerate(inp):
+        cpu.ram[XB + 8 * i:XB + 8 * i + 4] = (re & MASK).to_bytes(4, 'little')
+        cpu.ram[XB + 8 * i + 4:XB + 8 * i + 8] = (im & MASK).to_bytes(4, 'little')
+    cpu.load_words(CODE, prog)
+    n = cpu.run(prog, start=CODE)
+    got = [int.from_bytes(cpu.ram[AB + 4 * j:AB + 4 * j + 4], 'little') for j in range(16)]
+
+    def asr(x, s):
+        x &= MASK
+        if x & 0x80000000:
+            x -= (1 << 32)
+        return (x >> s) & MASK
+
+    a = [list(inp[rev3(k)]) for k in range(8)]
+
+    def rbf(p, q, W):
+        u1, u2 = a[p][:], a[q][:]
+        if W is None:
+            v = u2[:]
+        else:
+            wr, wi = W
+            v = [asr(((u2[0] * wr) & MASK) - ((u2[1] * wi) & MASK), 14),
+                 asr(((u2[0] * wi) & MASK) + ((u2[1] * wr) & MASK), 14)]
+        a[p] = [(u1[0] + v[0]) & MASK, (u1[1] + v[1]) & MASK]
+        a[q] = [(u1[0] - v[0]) & MASK, (u1[1] - v[1]) & MASK]
+
+    for b in (0, 2, 4, 6):
+        rbf(b, b + 1, None)
+    for b in (0, 4):
+        rbf(b, b + 2, None)
+        rbf(b + 1, b + 3, W2)
+    rbf(0, 4, None); rbf(1, 5, W1); rbf(2, 6, W2); rbf(3, 7, W3)
+    exp = []
+    for c in a:
+        exp += [c[0] & MASK, c[1] & MASK]
+
+    ok = (n == len(prog) and got == exp
+          and cpu.op_counts.get('carith:MUL32') == 20
+          and cpu.op_counts.get('bitfrob:BITREV8') == 8)
+    print(f"[14] FFT-8 DIT complex: instr={n} (exp {len(prog)}), "
+          f"MUL32={cpu.op_counts.get('carith:MUL32')}, "
+          f"BITREV8={cpu.op_counts.get('bitfrob:BITREV8')}, match={got == exp}")
+    if got != exp:
+        for j in range(16):
+            if got[j] != exp[j]:
+                print(f"     DIFF [{j//2}].{'re' if j % 2 == 0 else 'im'}: "
+                      f"got=0x{got[j]:08x} exp=0x{exp[j]:08x}")
+    print("    ->", "PASS" if ok else "FAIL")
+    return ok
+
+
+def test_cordic():
+    """CORDIC (Test 15): sin/cos branchless, N=16, Q14. Vorzeichen per ASR#31-
+    Maske, conditional-negate via ternlog-XOR + Sub — keine inneren Branches.
+    z0 aus RAM (0x3000) -> x,y nach 0x3010. Gegen Integer-Ref (exakt) und
+    float-math (<3e-4) geprueft. Kern: ASR, XOR, ADD(inv2), LDI atan-Tabelle."""
+    ZIN, OUT = 0x3000, 0x3010
+    MASK, N = 0xFFFFFFFF, 16
+    K = 1.0
+    for i in range(N):
+        K *= math.sqrt(1 + 2.0 ** (-2 * i))
+    X0 = round((1.0 / K) * 2 ** 14)
+    ATAN = [round(math.atan(2.0 ** (-i)) * 2 ** 14) for i in range(N)]
+    X, Y, Z, SM, DY, DX, DYE, DXE, AT, ATE = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+    S1, S2 = 17, 18
+    F1, F2 = 1, 2
+
+    def ldi(reg, val):
+        return ldi_movx_w(reg, val & 0xFFFF, sext=(val < 0))
+
+    prog = [ldi_movx_w(S1, ZIN), ldi_movx_w(S2, OUT), ldi(X, X0), ldi(Y, 0),
+            mem_w(Z, F1, 0, 0, 2)]
+    for i in range(N):
+        prog += [
+            cbitfrob_i_w(BitFrobMode.ASR, SM, Z, 31),          # sm = z>>31 (arith)
+            cbitfrob_i_w(BitFrobMode.ASR, DY, Y, i),           # dy = y>>i
+            cbitfrob_i_w(BitFrobMode.ASR, DX, X, i),           # dx = x>>i
+            ternlog_w(TernLut.XOR, DYE, DY, SM, 0),
+            carith_w(ArithMode.ADD, DYE, DYE, SM, inv2=True),  # dy_eff = (dy^sm)-sm
+            ternlog_w(TernLut.XOR, DXE, DX, SM, 0),
+            carith_w(ArithMode.ADD, DXE, DXE, SM, inv2=True),
+            ldi(AT, ATAN[i]),
+            ternlog_w(TernLut.XOR, ATE, AT, SM, 0),
+            carith_w(ArithMode.ADD, ATE, ATE, SM, inv2=True),
+            carith_w(ArithMode.ADD, X, X, DYE, inv2=True),     # x -= dy_eff
+            carith_w(ArithMode.ADD, Y, Y, DXE),                # y += dx_eff
+            carith_w(ArithMode.ADD, Z, Z, ATE, inv2=True),     # z -= atan_eff
+        ]
+    prog += [mem_w(X, F2, 0, 0, 2, wrf=True), mem_w(Y, F2, 0, 1, 2, wrf=True),
+             _halt()]
+
+    def asr(v, s):
+        v &= MASK
+        if v & 0x80000000:
+            v -= (1 << 32)
+        return (v >> s) & MASK
+
+    def ref(z0):
+        x, y, z = X0, 0, z0 & MASK
+        for i in range(N):
+            sm = MASK if (z & 0x80000000) else 0
+            dy = ((asr(y, i) ^ sm) - sm) & MASK
+            dx = ((asr(x, i) ^ sm) - sm) & MASK
+            ate = ((ATAN[i] ^ sm) - sm) & MASK
+            x = (x - dy) & MASK
+            y = (y + dx) & MASK
+            z = (z - ate) & MASK
+        return x, y, z
+
+    def s32(v):
+        v &= MASK
+        return v - (1 << 32) if v & 0x80000000 else v
+
+    worst, all_exact = 0.0, True
+    for deg in (0, 30, 45, 60, 90, -60, 17, 72):
+        th = math.radians(deg)
+        z0 = round(th * 2 ** 14) & MASK
+        cpu = ShellCPU()
+        cpu.ram[ZIN:ZIN + 4] = z0.to_bytes(4, 'little')
+        cpu.load_words(CODE, prog)
+        n = cpu.run(prog, start=CODE)
+        gx = int.from_bytes(cpu.ram[OUT:OUT + 4], 'little')
+        gy = int.from_bytes(cpu.ram[OUT + 4:OUT + 8], 'little')
+        rx, ry, _rz = ref(z0)
+        all_exact = all_exact and gx == rx and gy == ry and n == len(prog)
+        worst = max(worst, abs(s32(gx) / 2 ** 14 - math.cos(th)),
+                    abs(s32(gy) / 2 ** 14 - math.sin(th)))
+    ok = all_exact and worst < 3e-4
+    print(f"[15] CORDIC N={N} Q14: exact={all_exact} (8 Winkel), "
+          f"instr={len(prog)}, maxerr vs math={worst:.2e} (exp <3e-4)")
+    print("    ->", "PASS" if ok else "FAIL")
+    return ok
+
+
 def main():
     tests = [test_memcpy, test_strcpy, test_popcount, test_unaligned, test_strlen,
              test_fir, test_gf_mul, test_binomial, test_ldi, test_slogii_tsti,
-             test_cbitfrob_i]
+             test_cbitfrob_i, test_goertzel, test_bitrev_bam, test_fft8,
+             test_cordic]
     results = []
     for t in tests:
         try:

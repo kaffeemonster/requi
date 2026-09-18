@@ -602,3 +602,50 @@ Die drei F1-Imm13-Muster formal per z3 bewiesen (pipeline_smt.py M25):
 - **slogii `ones5/rep3/rot5`:** 31×6×32=5952 Kombis → **1303 distinkte Masken**. Klassiker alle erreichbar: 0xFFFFFFFF (ones=1,rep=5), 0x0F0F0F0F (ones=4,rep=2), 0xFF00FF00 (ones=8,rep=1,rot=8), 0x55555555 (ones=1,rep=4), 0x0000FFFF (ones=16,rep=0).
 - **Q132 sarithi-Variante `val8<<shift5` (Untertest):** 8192 Kombis → **3328 distinkt** — WENIGER als val9<<shift4 (4352), obwohl Shift-Bereich verdoppelt (0..31). Schmalerer Val (256 vs 512) dominiert die Verschnuerung (mehr Overlaps), 1034 Werte weniger. Groessere Konstanten (0x10000000) kommen neu dazu, aber vertrauter Offset-Bereich verliert. Lehre: Val-Breite wichtiger als Shift-Breite fuer Distinktivitaet.
 - Lemmas: R_SARITHI_IMM, R_CBITFROBI_AMT, R_SLOGII_MASK, R_SARITHI8. Laufzeit 0.32s.
+
+## 12. DSP-/Signal-Anwendungsfaelle (extrahierte Ideen)
+
+Aus einem Brainstorming-Transkript extrahiert (Sigmoid -> TinyML -> FOC-Motorregelung -> DSP/Goertzel/FFT -> MCSA-Lagerdiagnose -> CPU-ISA), kuratiert + auf unsere Primitiven gemappt. Enthaelt **reale Test-Algorithmen** und **eine echte ISA-Idee (Bitrev+Merge)**.
+
+### 12.1 ISA-Ideen
+
+**(1) `BITREV_BAM` — Variable-Breite Bit-Reverse + Merge.** Doc-Wunsch: `BITREV_BAM dst, idx, base, #N` = untere N Bits von idx spiegeln, direkt in base mergen (1 Op statt AND+SHL+ADD). Use: FFT-Adressgenerierung, Array-Transpose, SerDes, Krypto.
+- **Bausteine existieren:** `BITREV8`(4) = in-Byte-Reverse; **volles 32-bit-Bitrev = BITREV8 + permb-Nibble-Reorder** (pipeline.py:689). **Variable Breite** = `log2(N) × BITSWAP`(21, Butterfly `((x&m)>>k)|((x&~m)<<k)`) = Sklansky/Bitonic-Netz. **Merge** = ternlog-`OR` (1 Op).
+- => heute als **~4-6-Op-Mikrocode** machbar, **kein neues HW**. **OFFENE DESIGN-FRAGE:** dedizierte Fusions-Op (Hot-Path, AGU-schonend) ODER Orthogonalitaet behalten (BITSWAP-Kette + OR)?
+- Kandidat: neue bitfrob-Primitive `BITREVN` (Breite in src3/imm) als generischer Bit-Shuffle neben den spezifischen BITREV8/BITZIP/BITSWAP.
+- **Status (GEBAUT):** als Makro `bitrev_bam(dst, idx, base, n)` in `isa_shell.py` = **`BITREV8` + `cbitfrob_i LSR#(8-n)` + `ternlog OR`** (2-3 Instr). **Kern-Identitaet:** `reverse-low-N(x) = BITREV8(x) >> (8-N)` (Vorbedingung idx<2^N, base low-N=0/aligned). Fuer N≤8 reicht BITREV8 (in-Byte) — kein Byte-Reorder/permb noetig; N>8 bräuchte zusätzlich permb-Byte-Reverse. Exhaustiv n≤8 numerisch verifiziert + Test 13 (`shell_examples.py`). HW-Fusion bleibt optional (später), Orthogonalitaet reicht jetzt.
+
+**(2) PWL-Interpolation (`VINTERP_LUT`).** `y = y0 + frac·(y1−y0)`; Index = Ganzzahl-Teil waehlt y0/y1 aus LUT. **permb-Fit:** permb-Byte-Mode gathert Bytes per Index-Vektor = genau "LUT-in-Register". Rest: SUBB + MUL + cbitfrob_i-Shift + ADD. Kein neues HW; **idealer benannter Pseudo-Op** (Sigmoid/Saettigungskurven/GELU/Soft-ReLU).
+
+**(3) Complex-MAC (`CMAC`).** `(a+jb)(c+jd)`: **2× PMUL16** parallel (pack `(a,b)`·`(c,d)` -> ac, bd; `(a,b)`·`(d,c)` -> ad, bc) + SUB/ADD. FFT-Butterfly-Kern.
+
+**(4) Saturating-Pack (`VPAK`).** 32->8/16 mit Clipping = PMIN/PMAX-Clamp + Pack-Microcode (TinyML-Aktivierung/Quantisierung).
+
+**(5) Strided Gather/Scatter.** Memory-Plane-Kandidat (Stride-Register), andockbar an Base+Index-Modus.
+
+**Schon vorhanden (Doc-Idee abgedeckt):** vec_perm=`permb`, VMAX/VMIN=`PMAX/PMIN`, CLZ=`LZC`, MAC=`MUL32ACC/MULFMA`, Sat-Arith=`SATADD/USATADD/AVG/ABSADD`, ReLU=`PMAX(x,0)`, bitrev.8=`BITREV8`, PEXT/PDEP=`PEXT_N/PDEP_N`, GF=`CLMUL/POLY_RED/GFNI_AFFINE`.
+
+### 12.2 Algorithmus-Testfaelle (shell_examples-Kandidaten)
+
+| Algo | Primitiv-Bedarf | Reiz |
+|---|---|---|
+| **Goertzel** (1-Freq-Filter) | MUL32 + cbitfrob_i LSR#14 + Sub (ADD+inv2) + ADD | echtes DSP-Kernel, ~4 Ops/Sample |
+| **kleines FFT** (N=8) | Bitrev + CMAC + permb-Twiddle | prueft 12.1(1)+(3) |
+| **CORDIC** (sin/cos) | Shifts + Adds + ROL | multiplikations-frei, pure Shift-Add |
+| **PWL-Sigmoid** | permb-gather + MUL + SUB + ADD | prueft 12.1(2) |
+| **int8-SatMAC** | PSAD/PMUL16/SATADD | TinyML-Kern |
+| **MCSA-Peak/FFT** | FFT + Schwellenlogik | Stretch (baut auf FFT) |
+
+**Status:** `Goertzel` implementiert als **Test 12** (`shell_examples.py`, N=8, coeff=23170, q1/q2+Magnitude² gegen ISA-Semantik-Referenz geprueft). Loop-Kern = **9 Instr/Sample** (ld, MUL32, LSR#14, **1× `ADD` mit 3 Inputs+inv3** = prod+sample−q2, 2×MOV, ptr+, cnt−, bxx). 
+
+`FFT-8` implementiert als **Test 14** (`shell_examples.py`, 291 Instr, unrolled): radix-2 DIT complex, Eingabe via `bitrev_bam` bit-reversed permutiert; Q14-Twiddles (W₈⁰=1, W₈¹=(11585,−11585), W₈²=(0,−16384), W₈³=(−11585,−11585)); Complex-Mult = 4× MUL32 + 2× ADD(inv3) + ASR#14 (signed); 5 getwiddelte Butterflys → 20 MUL32, 8× BITREV8. Gegen identische ISA-Semantik **exakt** und gegen float-DFT **<1 LSB** verifiziert. Layout: Codes@0x1080, X@0x3000, A@0x3100 (Daten oberhalb des 291-Wort-Codes).
+
+**Schluessel-Funde:** 3-Input-Orthogonalitaet spart die separate Sub-Instruktion: `a+b−c` = **eine** arith4-Op via `inv3` (nicht `a−b`+`+c`); `BITREV_BAM`-Identitaet `reverse-low-N(x)=BITREV8(x)>>(8−N)`; C→S-Register-Transfer via `ternlog MOV_A` (dst global 5 Bit).
+
+`CORDIC` implementiert als **Test 15** (`shell_examples.py`, 216 Instr, N=16, Q14): sin/cos **branchless** — Vorzeichen via `ASR#31`-Maske (`sm = z>>31`), conditional-negate `(v^sm)−sm` (ternlog-XOR + ADD inv2). Kern: ASR, XOR, ADD(inv2), LDI-atan-Tabelle. Exact gegen Integer-Referenz + **float-math <3e-4** (~4 LSB bei 8 Winkeln ±90°). Demonstriert: branchlose Vorzeichenlogik ohne Sonder-HW.
+
+**OFFEN — int8-SatMAC:** braucht **Packed-Multiply mit aux-Rueckweg** (PMUL16: res=lo·lo, aux=hi·hi), aber die Shell gibt nur `res`/`flags` zurueck (aux verworfen, `_arith` returnt (res, flags)). Fuer packed-MAC zuerst aux-Readback in der Shell exponieren ODER Packed-Add-Weg (PSADD.b unsigned) als Teil-Demo nutzen.
+
+### 12.3 Nur-Peripherie (kein Kern-ISA)
+- ADC-Hardware-Trigger + memory-getriggerte Peripherie -> dockt an MSR/pseudo-MMIO-Design (Abschnitt 4).
+- "Escape-Hatch" / begrenzte Parameter-Adaption in der Regelschleife -> **Policy, nicht ISA**.
